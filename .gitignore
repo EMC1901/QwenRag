@@ -1,0 +1,47 @@
+# Environment-specific configuration and secrets.
+# Keep only checked-in templates such as .env.gateway.example.
+.env
+.env.*
+!.env.example
+!.env.*.example
+
+# Python bytecode, virtual environments, and tool caches.
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+env/
+ENV/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.tox/
+.nox/
+.coverage
+.coverage.*
+htmlcov/
+
+# Runtime logs and temporary files.
+*.log
+.tmp/
+tmp/
+temp/
+
+# Locally generated RAG artifacts: databases, converted documents, FAISS index,
+# exports, logs, and temporary test data. Rebuild with scripts/build_kb.py.
+/rag_data/
+
+# Source legal documents are local input data and can be very large.
+/Rawdata/
+
+# Local project documentation is not included in the source repository.
+/docs/
+/记事本.md
+
+# Local editor, assistant, and operating-system files.
+.vscode/
+.idea/
+.claude/
+.DS_Store
+Thumbs.db

@@ -1,0 +1,8 @@
+python-docx
+lxml
+requests
+tqdm
+pydantic
+numpy
+faiss-cpu
+pytest
