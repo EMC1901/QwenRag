@@ -42,9 +42,13 @@ def main() -> None:
     vector_path = Path(args.vector_file)
     meta_path = Path(args.meta)
 
-    if not db_path.exists():
+    if not db_path.exists() or not vector_path.exists():
+        missing = db_path if not db_path.exists() else vector_path
+        print(f"[FAIL] 必需文件不存在: {missing}")
+        sys.exit(2)
+    if not db_path.is_file():
         print(f"[FAIL] 数据库不存在: {db_path}")
-        sys.exit(1)
+        sys.exit(2)
 
     conn = sqlite3.connect(str(db_path))
     conn.row_factory = sqlite3.Row
@@ -124,6 +128,7 @@ def main() -> None:
             )
 
     conn.close()
+    sys.exit(0 if not issues else 1)
 
 
 if __name__ == "__main__":

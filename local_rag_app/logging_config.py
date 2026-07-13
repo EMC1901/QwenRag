@@ -4,6 +4,8 @@ import logging
 import re
 import uuid
 from contextvars import ContextVar
+from math import isfinite
+from numbers import Real
 from time import perf_counter
 
 from fastapi import FastAPI, Request, Response
@@ -24,15 +26,22 @@ _rag_routing_context: ContextVar[dict[str, str] | None] = ContextVar(
     "rag_routing_context",
     default=None,
 )
+_retrieval_context: ContextVar[dict[str, str] | None] = ContextVar(
+    "retrieval_context",
+    default=None,
+)
 _RAG_ROUTES = frozenset(
     {
         "router_disabled",
         "direct_llm",
         "retrieval_pending",
+        "retrieval_ready",
+        "retrieval_unavailable",
         "decision_unavailable",
     }
 )
 _RAG_DECISION_SOURCES = frozenset({"", "llm", "fallback"})
+_RETRIEVAL_MODES = frozenset({"vector", "hybrid"})
 
 
 def configure_logging(level: str) -> None:
@@ -69,6 +78,51 @@ def record_rag_route(route: str, source: str = "") -> None:
         context["source"] = source
 
 
+def record_retrieval_success(
+    *,
+    retrieval_mode: str,
+    hit_count: int,
+    vector_candidate_count: int,
+    fts_candidate_count: int,
+    duration_ms: float,
+) -> None:
+    """Attach aggregate retrieval metrics without retaining query or source contents."""
+    if retrieval_mode not in _RETRIEVAL_MODES:
+        raise ValueError("Unsupported retrieval mode")
+    for value in (hit_count, vector_candidate_count, fts_candidate_count):
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            raise ValueError("Retrieval counts must be non-negative integers")
+    _record_retrieval_duration(duration_ms)
+    context = _retrieval_context.get()
+    if context is not None:
+        context.update(
+            {
+                "mode": retrieval_mode,
+                "hit_count": str(hit_count),
+                "vector_candidate_count": str(vector_candidate_count),
+                "fts_candidate_count": str(fts_candidate_count),
+            }
+        )
+
+
+def record_retrieval_failure(*, duration_ms: float) -> None:
+    """Attach only elapsed time when retrieval cannot produce a safe result."""
+    _record_retrieval_duration(duration_ms)
+
+
+def _record_retrieval_duration(duration_ms: float) -> None:
+    if (
+        isinstance(duration_ms, bool)
+        or not isinstance(duration_ms, Real)
+        or not isfinite(duration_ms)
+        or duration_ms < 0
+    ):
+        raise ValueError("Retrieval duration must be a finite non-negative number")
+    context = _retrieval_context.get()
+    if context is not None:
+        context["duration_ms"] = f"{duration_ms:.2f}"
+
+
 def _resolve_request_id(request: Request) -> str:
     """Use a safe caller ID when present, otherwise issue a new UUID."""
     supplied = request.headers.get(REQUEST_ID_HEADER)
@@ -89,6 +143,15 @@ def add_request_id_middleware(app: FastAPI) -> None:
         upstream_status_token = _upstream_status_code.set(None)
         rag_routing_token = _rag_routing_context.set(
             {"route": "router_disabled", "source": ""}
+        )
+        retrieval_token = _retrieval_context.set(
+            {
+                "mode": "",
+                "hit_count": "",
+                "vector_candidate_count": "",
+                "fts_candidate_count": "",
+                "duration_ms": "",
+            }
         )
         started_at = perf_counter()
         response: Response | None = None
@@ -117,7 +180,9 @@ def add_request_id_middleware(app: FastAPI) -> None:
             logging.getLogger(LOGGER_NAME).info(
                 "request_id=%s method=%s path=%s status_code=%s duration_ms=%.2f "
                 "client_host=%s answer_mode=%s rag_route=%s rag_decision_source=%s "
-                "upstream_name=%s "
+                "retrieval_mode=%s retrieval_hit_count=%s "
+                "retrieval_vector_candidate_count=%s retrieval_fts_candidate_count=%s "
+                "retrieval_duration_ms=%s upstream_name=%s "
                 "upstream_status_code=%s error_code=%s",
                 request_id,
                 request.method,
@@ -128,12 +193,18 @@ def add_request_id_middleware(app: FastAPI) -> None:
                 answer_mode,
                 (_rag_routing_context.get() or {}).get("route", "router_disabled"),
                 (_rag_routing_context.get() or {}).get("source", ""),
+                (_retrieval_context.get() or {}).get("mode", ""),
+                (_retrieval_context.get() or {}).get("hit_count", ""),
+                (_retrieval_context.get() or {}).get("vector_candidate_count", ""),
+                (_retrieval_context.get() or {}).get("fts_candidate_count", ""),
+                (_retrieval_context.get() or {}).get("duration_ms", ""),
                 _upstream_name.get() or "",
                 _upstream_status_code.get() or "",
                 error_code,
             )
             _upstream_status_code.reset(upstream_status_token)
             _upstream_name.reset(upstream_name_token)
+            _retrieval_context.reset(retrieval_token)
             _rag_routing_context.reset(rag_routing_token)
             _request_id.reset(request_token)
 

@@ -15,6 +15,7 @@
 """
 
 import argparse
+import os
 import sys
 from pathlib import Path
 
@@ -24,6 +25,10 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 from rag_preprocess.config import Config
 from rag_preprocess.utils import setup_logging
+
+
+class StageExecutionError(RuntimeError):
+    """表示阶段无法安全继续的致命错误。"""
 
 
 def parse_args() -> argparse.Namespace:
@@ -42,6 +47,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--limit", type=int, default=None, help="限制处理文件数量（调试用）")
     parser.add_argument("--resume", action="store_true", help="断点续跑（跳过已完成）")
     parser.add_argument("--force", action="store_true", help="强制全部重建（覆盖已有结果）")
+    parser.add_argument(
+        "--embedding-batch-size",
+        type=int,
+        default=None,
+        help="阶段 8 embedding 批量大小（正整数，默认使用配置值）",
+    )
     parser.add_argument("--log-level", default="INFO", help="日志级别")
     return parser.parse_args()
 
@@ -920,7 +931,7 @@ def _export_chunk_sample(conn, output_dir: Path, sample_size: int = 100) -> Path
 # 阶段 8: embedding 向量化
 # ═══════════════════════════════════════════════════════════════
 
-def run_stage_embed(config: Config, logger) -> None:
+def _run_stage_embed_impl(config: Config, logger) -> None:
     """阶段 8: 调用 embedding 服务，把 chunk_text_for_embedding 转成向量。"""
     import json
 
@@ -928,7 +939,6 @@ def run_stage_embed(config: Config, logger) -> None:
 
     from rag_preprocess.database import (
         connect_db,
-        init_db,
         insert_build_error,
         reset_chunk_embeddings,
         update_chunk_embedding_status,
@@ -940,14 +950,27 @@ def run_stage_embed(config: Config, logger) -> None:
         validate_embedding,
     )
     from rag_preprocess.paths import ensure_output_dirs
+    from tools.check_embedding_consistency import check_embedding_consistency
 
     logger.info("=" * 50)
     logger.info("阶段 8: embedding 向量化")
     logger.info("=" * 50)
 
-    ensure_output_dirs(config.output_dir)
-    conn = connect_db(config.db_path)
-    init_db(conn)
+    if config.embedding_batch_size < 1:
+        raise StageExecutionError("embedding 批量大小必须为正整数")
+    if not config.db_path.is_file():
+        raise StageExecutionError(f"数据库不存在或不是文件: {config.db_path}")
+    try:
+        ensure_output_dirs(config.output_dir)
+        conn = connect_db(config.db_path)
+    except Exception as exc:
+        raise StageExecutionError(f"无法打开或准备数据库/输出目录: {exc}") from exc
+    required_columns = {"chunk_id", "chunk_text_for_embedding", "vector_id", "embedding_status"}
+    actual_columns = {row["name"] for row in conn.execute("PRAGMA table_info(chunks)")}
+    missing_columns = required_columns - actual_columns
+    if missing_columns:
+        conn.close()
+        raise StageExecutionError(f"chunks 表不存在或结构错误，缺少字段: {', '.join(sorted(missing_columns))}")
     conn.execute("PRAGMA synchronous=NORMAL")
     conn.execute("PRAGMA temp_store=MEMORY")
     conn.execute("PRAGMA cache_size=-200000")
@@ -986,6 +1009,18 @@ def run_stage_embed(config: Config, logger) -> None:
         conn.close()
         return
 
+    vector_dir = config.output_dir / "vector_index"
+    vector_path = vector_dir / "embeddings.jsonl"
+    meta_path = vector_dir / "embeddings.meta.json"
+    if config.resume and (vector_path.exists() or conn.execute(
+        "SELECT COUNT(*) FROM chunks WHERE embedding_status = 'success'"
+    ).fetchone()[0] > 0):
+        consistency = check_embedding_consistency(config.db_path, vector_path, mode="quick")
+        if not consistency.is_consistent:
+            conn.close()
+            details = consistency.read_error or "; ".join(consistency.issues)
+            raise StageExecutionError(f"--resume 前 SQLite/JSONL 不一致: {details}")
+
     logger.info(f"Embedding 服务: {get_embedding_base_url()}")
     logger.info(f"模型: {config.embedding_model}")
     logger.info(f"期望维度: {config.embedding_dim}")
@@ -1000,23 +1035,30 @@ def run_stage_embed(config: Config, logger) -> None:
         message = preflight.error_message if preflight else "embedding 预检无返回"
         logger.error(f"embedding 服务预检失败，不修改数据库: {message}")
         conn.close()
-        return
+        raise StageExecutionError(f"embedding 服务预检失败: {message}")
     if not validate_embedding(preflight.vector, config.embedding_dim):
         logger.error(
             "embedding 服务预检维度不匹配，不修改数据库: "
             f"expected={config.embedding_dim}, actual={len(preflight.vector)}"
         )
         conn.close()
-        return
+        raise StageExecutionError(
+            "embedding 服务预检维度不匹配: "
+            f"expected={config.embedding_dim}, actual={len(preflight.vector)}"
+        )
+
+    try:
+        vector_dir.mkdir(parents=True, exist_ok=True)
+        with open(vector_dir / ".write-test", "w", encoding="utf-8"):
+            pass
+        (vector_dir / ".write-test").unlink()
+    except OSError as exc:
+        conn.close()
+        raise StageExecutionError(f"向量目录不可写: {vector_dir}: {exc}") from exc
 
     chunk_ids = [row["chunk_id"] for row in rows]
     if not config.resume:
         reset_chunk_embeddings(conn, chunk_ids)
-
-    vector_dir = config.output_dir / "vector_index"
-    vector_dir.mkdir(parents=True, exist_ok=True)
-    vector_path = vector_dir / "embeddings.jsonl"
-    meta_path = vector_dir / "embeddings.meta.json"
     append_mode = config.resume and vector_path.exists()
 
     if append_mode:
@@ -1053,6 +1095,8 @@ def run_stage_embed(config: Config, logger) -> None:
                 batch_size=config.embedding_batch_size,
             )
 
+            successful_rows: list[tuple[str, int]] = []
+            failed_rows: list[tuple[str, str, str]] = []
             for row, result in zip(batch_rows, results):
                 chunk_id = row["chunk_id"]
                 total_retry_count += result.retry_count
@@ -1060,44 +1104,18 @@ def run_stage_embed(config: Config, logger) -> None:
                 if not result.success or result.vector is None:
                     failed_count += 1
                     message = result.error_message or "embedding failed"
-                    update_chunk_embedding_status(
-                        conn,
-                        chunk_id,
-                        "failed",
-                        None,
-                        commit=False,
-                    )
-                    insert_build_error(
-                        conn,
-                        error_id=f"embed:{chunk_id}",
-                        stage="embed",
-                        error_type="embedding_error",
-                        error_message=message[:1000],
-                        doc_id=None,
-                        commit=False,
-                    )
+                    failed_rows.append((chunk_id, "embedding_error", message[:1000]))
                     continue
 
                 vector = result.vector
                 if not validate_embedding(vector, config.embedding_dim):
                     failed_count += 1
                     dim_failed_count += 1
-                    update_chunk_embedding_status(
-                        conn,
+                    failed_rows.append((
                         chunk_id,
-                        "failed",
-                        None,
-                        commit=False,
-                    )
-                    insert_build_error(
-                        conn,
-                        error_id=f"embed_dim:{chunk_id}",
-                        stage="embed",
-                        error_type="embedding_dim_mismatch",
-                        error_message=f"expected={config.embedding_dim}, actual={len(vector)}",
-                        doc_id=None,
-                        commit=False,
-                    )
+                        "embedding_dim_mismatch",
+                        f"expected={config.embedding_dim}, actual={len(vector)}",
+                    ))
                     continue
 
                 if config.vector_normalized:
@@ -1114,6 +1132,13 @@ def run_stage_embed(config: Config, logger) -> None:
                     "vector": vector,
                 }
                 f.write(json.dumps(item, ensure_ascii=False) + "\n")
+                successful_rows.append((chunk_id, vector_id))
+                success_count += 1
+
+            # 先确保 JSONL 已经落盘，再提交对应的 SQLite 映射，避免 DB 指向不存在的向量。
+            f.flush()
+            os.fsync(f.fileno())
+            for chunk_id, vector_id in successful_rows:
                 update_chunk_embedding_status(
                     conn,
                     chunk_id,
@@ -1121,10 +1146,18 @@ def run_stage_embed(config: Config, logger) -> None:
                     vector_id,
                     commit=False,
                 )
-                success_count += 1
-
+            for chunk_id, error_type, message in failed_rows:
+                update_chunk_embedding_status(conn, chunk_id, "failed", None, commit=False)
+                insert_build_error(
+                    conn,
+                    error_id=f"embed:{chunk_id}",
+                    stage="embed",
+                    error_type=error_type,
+                    error_message=message,
+                    doc_id=None,
+                    commit=False,
+                )
             conn.commit()
-            f.flush()
 
     meta = {
         "embedding_model": config.embedding_model,
@@ -1169,6 +1202,16 @@ def run_stage_embed(config: Config, logger) -> None:
 
     conn.close()
     logger.info("阶段 8 结束。")
+
+
+def run_stage_embed(config: Config, logger) -> None:
+    """执行阶段 8，并把任意基础设施故障转换为明确的致命阶段错误。"""
+    try:
+        _run_stage_embed_impl(config, logger)
+    except StageExecutionError:
+        raise
+    except Exception as exc:
+        raise StageExecutionError(f"阶段 8 无法安全继续: {exc}") from exc
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -1365,6 +1408,11 @@ def main() -> None:
     args = parse_args()
     logger = setup_logging(args.log_level)
 
+    if args.embedding_batch_size is not None and args.embedding_batch_size < 1:
+        parser_error = "--embedding-batch-size 必须为正整数"
+        logger.error(parser_error)
+        raise SystemExit(2)
+
     config = Config(
         rawdata_dir=Path(args.rawdata_dir),
         output_dir=Path(args.output_dir),
@@ -1372,6 +1420,11 @@ def main() -> None:
         resume=args.resume,
         force=args.force,
         log_level=args.log_level,
+        embedding_batch_size=(
+            args.embedding_batch_size
+            if args.embedding_batch_size is not None
+            else Config.embedding_batch_size
+        ),
     )
 
     stage_handlers = {
@@ -1385,17 +1438,21 @@ def main() -> None:
         "faiss": run_stage_faiss,
     }
 
-    if args.stage == "all":
-        logger.info("全量构建...")
-        for stage_name, handler in stage_handlers.items():
-            handler(config, logger)
-        logger.info("构建完成。")
-    else:
-        handler = stage_handlers.get(args.stage)
-        if handler:
-            handler(config, logger)
+    try:
+        if args.stage == "all":
+            logger.info("全量构建...")
+            for stage_name, handler in stage_handlers.items():
+                handler(config, logger)
+            logger.info("构建完成。")
         else:
-            logger.warning(f"阶段 '{args.stage}' 尚未实现")
+            handler = stage_handlers.get(args.stage)
+            if handler:
+                handler(config, logger)
+            else:
+                logger.warning(f"阶段 '{args.stage}' 尚未实现")
+    except StageExecutionError as exc:
+        logger.error("阶段执行失败: %s", exc)
+        raise SystemExit(1) from exc
 
 
 if __name__ == "__main__":

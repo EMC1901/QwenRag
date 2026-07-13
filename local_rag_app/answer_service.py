@@ -2,14 +2,25 @@
 
 from collections.abc import AsyncIterator
 from time import time
+from time import perf_counter
 from typing import Protocol
 from uuid import uuid4
 
 from local_rag_app.config import Settings
-from local_rag_app.errors import LocalRagError, rag_retrieval_not_ready_error
+from local_rag_app.errors import (
+    LocalRagError,
+    rag_answer_generation_not_ready_error,
+    rag_retrieval_not_ready_error,
+)
 from local_rag_app.gateway_client import ModelGatewayClient
-from local_rag_app.logging_config import get_request_id, record_rag_route
+from local_rag_app.logging_config import (
+    get_request_id,
+    record_rag_route,
+    record_retrieval_failure,
+    record_retrieval_success,
+)
 from local_rag_app.rag_decision import RagDecisionService
+from local_rag_app.retrieval import LocalRetriever, extract_latest_user_query
 from local_rag_app.schemas import (
     AssistantMessage,
     ChatCompletionChunk,
@@ -137,7 +148,7 @@ class GatewayAnswerService:
 
 
 class RagRouterAnswerService:
-    """Route chats to direct LLM generation or the future local retrieval path."""
+    """Route chats to direct LLM generation or safe staged local retrieval."""
 
     def __init__(
         self,
@@ -145,10 +156,15 @@ class RagRouterAnswerService:
         *,
         decision_service: RagDecisionService | None = None,
         gateway_answer_service: AnswerService | None = None,
+        retriever: LocalRetriever | None = None,
     ) -> None:
+        self._settings = settings
         self._decision_service = decision_service or RagDecisionService(settings)
         self._gateway_answer_service = (
             gateway_answer_service or GatewayAnswerService(settings)
+        )
+        self._retriever = retriever or (
+            LocalRetriever(settings) if settings.enable_local_retrieval else None
         )
 
     async def complete(
@@ -161,8 +177,8 @@ class RagRouterAnswerService:
             record_rag_route("direct_llm", "llm")
             return await self._gateway_answer_service.complete(request)
 
-        record_rag_route("retrieval_pending", "llm")
-        raise rag_retrieval_not_ready_error()
+        await self._retrieve_before_answer_generation(request)
+        raise rag_answer_generation_not_ready_error()
 
     async def stream(
         self,
@@ -174,8 +190,8 @@ class RagRouterAnswerService:
             record_rag_route("direct_llm", "llm")
             return await self._gateway_answer_service.stream(request)
 
-        record_rag_route("retrieval_pending", "llm")
-        raise rag_retrieval_not_ready_error()
+        await self._retrieve_before_answer_generation(request)
+        raise rag_answer_generation_not_ready_error()
 
     async def _decide(self, request: ChatCompletionRequest):
         """Preserve a safe route marker when the decision service is unavailable."""
@@ -184,6 +200,30 @@ class RagRouterAnswerService:
         except LocalRagError:
             record_rag_route("decision_unavailable")
             raise
+
+    async def _retrieve_before_answer_generation(
+        self,
+        request: ChatCompletionRequest,
+    ) -> None:
+        """Run local retrieval or preserve the earlier fail-closed disabled behavior."""
+        if not self._settings.enable_local_retrieval or self._retriever is None:
+            record_rag_route("retrieval_pending", "llm")
+            raise rag_retrieval_not_ready_error()
+        started_at = perf_counter()
+        try:
+            result = await self._retriever.retrieve(extract_latest_user_query(request))
+        except LocalRagError:
+            record_retrieval_failure(duration_ms=(perf_counter() - started_at) * 1000)
+            record_rag_route("retrieval_unavailable", "llm")
+            raise
+        record_retrieval_success(
+            retrieval_mode=result.retrieval_mode,
+            hit_count=len(result.hits),
+            vector_candidate_count=result.vector_candidate_count,
+            fts_candidate_count=result.fts_candidate_count,
+            duration_ms=(perf_counter() - started_at) * 1000,
+        )
+        record_rag_route("retrieval_ready", "llm")
 
 
 def _encode_sse_event(chunk: ChatCompletionChunk) -> bytes:

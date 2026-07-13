@@ -38,6 +38,9 @@ def test_request_log_has_diagnostic_fields_without_prompt_or_key(monkeypatch, ca
     assert "answer_mode=stub" in log_text
     assert "rag_route=router_disabled" in log_text
     assert "rag_decision_source= " in log_text
+    assert "retrieval_mode= " in log_text
+    assert "retrieval_hit_count= " in log_text
+    assert "retrieval_duration_ms= " in log_text
     assert "error_code=" in log_text
     assert private_prompt not in log_text
     assert local_key not in log_text

@@ -5,7 +5,11 @@ from fastapi.testclient import TestClient
 
 from local_rag_app.errors import (
     gateway_connection_error,
+    missing_retrieval_query_error,
+    rag_answer_generation_not_ready_error,
     rag_decision_unavailable_error,
+    rag_knowledge_base_unavailable_error,
+    rag_retrieval_unavailable_error,
     rag_retrieval_not_ready_error,
 )
 from local_rag_app.main import create_app
@@ -73,6 +77,46 @@ def test_rag_router_errors_use_documented_safe_503_contracts() -> None:
         "rag_retrieval_not_ready",
         "This question requires the local knowledge base, but retrieval is not ready",
     )
+
+
+def test_local_retrieval_errors_use_stable_safe_contracts() -> None:
+    """Stage-1 retrieval failures must not expose paths, queries, or tracebacks."""
+    errors = [
+        missing_retrieval_query_error(),
+        rag_knowledge_base_unavailable_error(),
+        rag_retrieval_unavailable_error(),
+        rag_answer_generation_not_ready_error(),
+    ]
+
+    assert [
+        (error.status_code, error.error_type, error.code, error.message)
+        for error in errors
+    ] == [
+        (
+            400,
+            "invalid_request_error",
+            "missing_retrieval_query",
+            "A non-empty user query is required for knowledge retrieval",
+        ),
+        (
+            503,
+            "service_unavailable_error",
+            "rag_knowledge_base_unavailable",
+            "The local knowledge base is unavailable",
+        ),
+        (
+            503,
+            "service_unavailable_error",
+            "rag_retrieval_unavailable",
+            "Local knowledge retrieval failed",
+        ),
+        (
+            503,
+            "service_unavailable_error",
+            "rag_answer_generation_not_ready",
+            "Knowledge retrieval succeeded, but RAG answer generation is not ready",
+        ),
+    ]
 
 
 def test_unexpected_error_is_a_safe_500_with_request_id() -> None:

@@ -41,6 +41,10 @@ class Settings(BaseSettings):
         default=False,
         alias="ENABLE_RAG_ROUTER",
     )
+    enable_local_retrieval: bool = Field(
+        default=False,
+        alias="ENABLE_LOCAL_RETRIEVAL",
+    )
     rag_router_max_tokens: int = Field(
         default=128,
         ge=32,
@@ -57,6 +61,48 @@ class Settings(BaseSettings):
         alias="MODEL_GATEWAY_API_KEY",
     )
     upstream_llm_model: str = Field(default="", alias="UPSTREAM_LLM_MODEL")
+    upstream_embedding_model: str = Field(
+        default="qwen3-embedding-0.6b",
+        alias="UPSTREAM_EMBEDDING_MODEL",
+    )
+
+    rag_knowledge_base_dir: Path = Field(
+        default=PROJECT_ROOT / "rag_data",
+        alias="RAG_KNOWLEDGE_BASE_DIR",
+    )
+    rag_embedding_dim: int = Field(
+        default=1024,
+        gt=0,
+        alias="RAG_EMBEDDING_DIM",
+    )
+    rag_vector_top_k: int = Field(default=40, gt=0, alias="RAG_VECTOR_TOP_K")
+    rag_fts_top_k: int = Field(default=40, gt=0, alias="RAG_FTS_TOP_K")
+    rag_final_top_k: int = Field(default=8, gt=0, alias="RAG_FINAL_TOP_K")
+    rag_max_chunks_per_doc: int = Field(
+        default=3,
+        gt=0,
+        alias="RAG_MAX_CHUNKS_PER_DOC",
+    )
+    rag_enable_fts: bool = Field(default=True, alias="RAG_ENABLE_FTS")
+    rag_allow_fts_fallback: bool = Field(
+        default=True,
+        alias="RAG_ALLOW_FTS_FALLBACK",
+    )
+    rag_rrf_k: int = Field(default=60, gt=0, alias="RAG_RRF_K")
+    rag_vector_weight: float = Field(
+        default=0.6,
+        ge=0,
+        alias="RAG_VECTOR_WEIGHT",
+    )
+    rag_fts_weight: float = Field(
+        default=0.4,
+        ge=0,
+        alias="RAG_FTS_WEIGHT",
+    )
+    rag_allow_partial_index: bool = Field(
+        default=False,
+        alias="RAG_ALLOW_PARTIAL_INDEX",
+    )
 
     http_connect_timeout_seconds: float = Field(
         default=5,
@@ -100,11 +146,27 @@ class Settings(BaseSettings):
             )
         return normalized
 
-    @field_validator("local_rag_model", "upstream_llm_model", mode="before")
+    @field_validator(
+        "local_rag_model",
+        "upstream_llm_model",
+        "upstream_embedding_model",
+        mode="before",
+    )
     @classmethod
     def normalize_model_names(cls, value: Any) -> str:
         """Reject empty model names once they are required by the active mode."""
         return "" if value is None else str(value).strip()
+
+    @field_validator("rag_knowledge_base_dir", mode="before")
+    @classmethod
+    def resolve_knowledge_base_dir(cls, value: Any) -> Path:
+        """Resolve a configured knowledge-base root without touching the filesystem."""
+        if value is None or not str(value).strip():
+            raise ValueError("RAG_KNOWLEDGE_BASE_DIR cannot be empty")
+        path = Path(value).expanduser()
+        if not path.is_absolute():
+            path = PROJECT_ROOT / path
+        return path.resolve(strict=False)
 
     @field_validator("local_rag_api_keys", mode="before")
     @classmethod
@@ -151,6 +213,29 @@ class Settings(BaseSettings):
                 raise ValueError(
                     "gateway mode requires: " + ", ".join(missing)
                 )
+        retrieval_is_active = (
+            self.local_rag_answer_mode == "gateway"
+            and self.enable_rag_router
+            and self.enable_local_retrieval
+        )
+        if retrieval_is_active and not self.upstream_embedding_model:
+            raise ValueError(
+                "local retrieval requires: UPSTREAM_EMBEDDING_MODEL"
+            )
+        if self.rag_final_top_k > self.rag_vector_top_k + self.rag_fts_top_k:
+            raise ValueError(
+                "RAG_FINAL_TOP_K cannot exceed the combined candidate top-k"
+            )
+        if self.rag_max_chunks_per_doc > self.rag_final_top_k:
+            raise ValueError(
+                "RAG_MAX_CHUNKS_PER_DOC cannot exceed RAG_FINAL_TOP_K"
+            )
+        if self.rag_vector_weight + self.rag_fts_weight <= 0:
+            raise ValueError("RAG retrieval weights must have a positive sum")
+        if not self.rag_enable_fts and self.rag_vector_weight <= 0:
+            raise ValueError(
+                "RAG_VECTOR_WEIGHT must be positive when RAG_ENABLE_FTS=false"
+            )
         return self
 
 

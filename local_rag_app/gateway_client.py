@@ -2,6 +2,7 @@
 
 from collections.abc import AsyncIterator
 from json import JSONDecodeError, dumps, loads
+from math import isfinite
 from typing import Any
 
 import httpx
@@ -103,9 +104,44 @@ class ModelGatewayClient:
             local_model=local_model,
         )
 
+    async def create_embedding(
+        self,
+        text: str,
+        *,
+        request_id: str | None = None,
+    ) -> list[float]:
+        """Create one validated query embedding through the model gateway."""
+        record_upstream_result("model_gateway_embedding")
+        try:
+            async with self._new_client() as client:
+                response = await client.post(
+                    self._embedding_url,
+                    json={
+                        "model": self._settings.upstream_embedding_model,
+                        "input": text,
+                    },
+                    headers=self._headers(request_id),
+                )
+        except httpx.TimeoutException as exc:
+            raise gateway_timeout_error() from exc
+        except httpx.TransportError as exc:
+            raise gateway_connection_error() from exc
+
+        record_upstream_result("model_gateway_embedding", response.status_code)
+        self._raise_for_status(response)
+        try:
+            payload = response.json()
+        except (JSONDecodeError, ValueError) as exc:
+            raise gateway_invalid_response_error() from exc
+        return self._parse_embedding_payload(payload)
+
     @property
     def _chat_url(self) -> str:
         return f"{self._settings.model_gateway_base_url}/chat/completions"
+
+    @property
+    def _embedding_url(self) -> str:
+        return f"{self._settings.model_gateway_base_url}/embeddings"
 
     def _new_client(self) -> httpx.AsyncClient:
         return httpx.AsyncClient(
@@ -123,6 +159,43 @@ class ModelGatewayClient:
         body = request.model_dump(mode="json")
         body["model"] = self._settings.upstream_llm_model
         return body
+
+    def _parse_embedding_payload(self, payload: Any) -> list[float]:
+        """Validate one finite, non-zero embedding without logging its contents."""
+        if not isinstance(payload, dict):
+            raise gateway_invalid_response_error()
+
+        model = payload.get("model")
+        if model is not None and model != self._settings.upstream_embedding_model:
+            raise gateway_invalid_response_error()
+
+        data = payload.get("data")
+        if not isinstance(data, list) or len(data) != 1:
+            raise gateway_invalid_response_error()
+        item = data[0]
+        if not isinstance(item, dict):
+            raise gateway_invalid_response_error()
+        raw_embedding = item.get("embedding")
+        if not isinstance(raw_embedding, list) or not raw_embedding:
+            raise gateway_invalid_response_error()
+
+        embedding: list[float] = []
+        for value in raw_embedding:
+            if isinstance(value, bool):
+                raise gateway_invalid_response_error()
+            try:
+                number = float(value)
+            except (TypeError, ValueError, OverflowError) as exc:
+                raise gateway_invalid_response_error() from exc
+            if not isfinite(number):
+                raise gateway_invalid_response_error()
+            embedding.append(number)
+
+        if len(embedding) != self._settings.rag_embedding_dim:
+            raise gateway_invalid_response_error()
+        if not any(value != 0.0 for value in embedding):
+            raise gateway_invalid_response_error()
+        return embedding
 
     def _headers(self, request_id: str | None) -> dict[str, str]:
         """Use only the configured service credential for the model-gateway request."""

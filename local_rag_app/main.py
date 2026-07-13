@@ -11,14 +11,15 @@ from local_rag_app.errors import (
     unexpected_error_response,
 )
 from local_rag_app.logging_config import add_request_id_middleware, configure_logging
-from local_rag_app.routes import router
+from local_rag_app import routes
 
 
 @asynccontextmanager
-async def lifespan(_: FastAPI):
-    """Validate runtime settings before the HTTP server starts accepting requests."""
+async def lifespan(app: FastAPI):
+    """Create one answer service before this process starts accepting requests."""
     settings = get_settings()
     configure_logging(settings.log_level)
+    app.state.answer_service = routes.get_answer_service(settings)
     yield
 
 
@@ -33,7 +34,7 @@ def create_app() -> FastAPI:
     app.add_exception_handler(LocalRagError, local_rag_error_response)
     app.add_exception_handler(Exception, unexpected_error_response)
     add_request_id_middleware(app)
-    app.include_router(router)
+    app.include_router(routes.router)
     return app
 
 

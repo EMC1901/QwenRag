@@ -68,6 +68,46 @@ def rag_retrieval_not_ready_error() -> LocalRagError:
     )
 
 
+def missing_retrieval_query_error() -> LocalRagError:
+    """Reject a RAG request that has no usable user query."""
+    return invalid_request_error(
+        "A non-empty user query is required for knowledge retrieval",
+        "missing_retrieval_query",
+    )
+
+
+def retrieval_query_too_long_error() -> LocalRagError:
+    """Reject oversized retrieval queries instead of changing their meaning by truncation."""
+    return invalid_request_error(
+        "The retrieval query is too long",
+        "retrieval_query_too_long",
+    )
+
+
+def rag_knowledge_base_unavailable_error() -> LocalRagError:
+    """Hide local asset details when the knowledge base cannot be used safely."""
+    return service_not_ready_error(
+        "The local knowledge base is unavailable",
+        "rag_knowledge_base_unavailable",
+    )
+
+
+def rag_retrieval_unavailable_error() -> LocalRagError:
+    """Report a retrieval execution failure without leaking private data."""
+    return service_not_ready_error(
+        "Local knowledge retrieval failed",
+        "rag_retrieval_unavailable",
+    )
+
+
+def rag_answer_generation_not_ready_error() -> LocalRagError:
+    """Mark successful retrieval before context-aware answer generation exists."""
+    return service_not_ready_error(
+        "Knowledge retrieval succeeded, but RAG answer generation is not ready",
+        "rag_answer_generation_not_ready",
+    )
+
+
 def gateway_connection_error() -> LocalRagError:
     """Hide model-gateway connection details behind a stable local API error."""
     return LocalRagError(

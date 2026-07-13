@@ -3,5 +3,7 @@ uvicorn[standard]
 httpx
 pydantic
 pydantic-settings
+numpy
+faiss-cpu
 pytest
 pytest-asyncio

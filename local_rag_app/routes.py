@@ -56,7 +56,9 @@ async def chat_completions(
         body,
         expected_model=settings.local_rag_model,
     )
-    answer_service = get_answer_service(settings)
+    answer_service = getattr(request.app.state, "answer_service", None)
+    if answer_service is None:
+        answer_service = get_answer_service(settings)
 
     if completion_request.stream:
         event_stream = await answer_service.stream(completion_request)
