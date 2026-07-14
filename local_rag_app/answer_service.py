@@ -1,11 +1,10 @@
 """Answer-service implementations for the local OpenAI-compatible API."""
 
 from collections.abc import AsyncIterator
-from time import time
 from time import perf_counter
 from typing import Protocol
-from uuid import uuid4
 
+from local_rag_app.completion_utils import build_fixed_completion, iter_fixed_sse_events
 from local_rag_app.config import Settings
 from local_rag_app.errors import (
     LocalRagError,
@@ -19,17 +18,13 @@ from local_rag_app.logging_config import (
     record_retrieval_failure,
     record_retrieval_success,
 )
+from local_rag_app.rag_generation import RagGenerationService
 from local_rag_app.rag_decision import RagDecisionService
 from local_rag_app.retrieval import LocalRetriever, extract_latest_user_query
+from local_rag_app.retrieval_models import RetrievalResult
 from local_rag_app.schemas import (
-    AssistantMessage,
-    ChatCompletionChunk,
     ChatCompletionRequest,
     ChatCompletionResponse,
-    ChunkChoice,
-    CompletionChoice,
-    Delta,
-    Usage,
 )
 
 
@@ -63,52 +58,14 @@ class StubAnswerService:
         request: ChatCompletionRequest,
     ) -> ChatCompletionResponse:
         """Return a fixed response while preserving the local API model name."""
-        completion_id, created = self._new_completion_metadata()
-        return ChatCompletionResponse(
-            id=completion_id,
-            created=created,
-            model=self._model,
-            choices=[
-                CompletionChoice(
-                    message=AssistantMessage(content=STUB_ANSWER),
-                )
-            ],
-            usage=Usage(),
-        )
+        return build_fixed_completion(self._model, STUB_ANSWER)
 
     async def stream(
         self,
         request: ChatCompletionRequest,
     ) -> AsyncIterator[bytes]:
         """Return a byte stream containing role, content, and finish SSE events."""
-        return self._iter_sse_events()
-
-    async def _iter_sse_events(self) -> AsyncIterator[bytes]:
-        """Yield role, content, and finish chunks in standard SSE order."""
-        completion_id, created = self._new_completion_metadata()
-        yield _encode_sse_event(ChatCompletionChunk(
-            id=completion_id,
-            created=created,
-            model=self._model,
-            choices=[ChunkChoice(delta=Delta(role="assistant"))],
-        ))
-        yield _encode_sse_event(ChatCompletionChunk(
-            id=completion_id,
-            created=created,
-            model=self._model,
-            choices=[ChunkChoice(delta=Delta(content=STUB_ANSWER))],
-        ))
-        yield _encode_sse_event(ChatCompletionChunk(
-            id=completion_id,
-            created=created,
-            model=self._model,
-            choices=[ChunkChoice(delta=Delta(), finish_reason="stop")],
-        ))
-        yield b"data: [DONE]\n\n"
-
-    @staticmethod
-    def _new_completion_metadata() -> tuple[str, int]:
-        return f"chatcmpl-local-{uuid4().hex}", int(time())
+        return iter_fixed_sse_events(self._model, STUB_ANSWER)
 
 
 class GatewayAnswerService:
@@ -157,6 +114,7 @@ class RagRouterAnswerService:
         decision_service: RagDecisionService | None = None,
         gateway_answer_service: AnswerService | None = None,
         retriever: LocalRetriever | None = None,
+        rag_generation_service: RagGenerationService | None = None,
     ) -> None:
         self._settings = settings
         self._decision_service = decision_service or RagDecisionService(settings)
@@ -165,6 +123,11 @@ class RagRouterAnswerService:
         )
         self._retriever = retriever or (
             LocalRetriever(settings) if settings.enable_local_retrieval else None
+        )
+        self._rag_generation_service = rag_generation_service or (
+            RagGenerationService(settings)
+            if settings.enable_rag_answer_generation
+            else None
         )
 
     async def complete(
@@ -177,8 +140,11 @@ class RagRouterAnswerService:
             record_rag_route("direct_llm", "llm")
             return await self._gateway_answer_service.complete(request)
 
-        await self._retrieve_before_answer_generation(request)
-        raise rag_answer_generation_not_ready_error()
+        result = await self._retrieve_before_answer_generation(request)
+        if not self._settings.enable_rag_answer_generation:
+            record_rag_route("retrieval_ready", "llm")
+            raise rag_answer_generation_not_ready_error()
+        return await self._complete_rag_answer(request, result)
 
     async def stream(
         self,
@@ -190,8 +156,11 @@ class RagRouterAnswerService:
             record_rag_route("direct_llm", "llm")
             return await self._gateway_answer_service.stream(request)
 
-        await self._retrieve_before_answer_generation(request)
-        raise rag_answer_generation_not_ready_error()
+        result = await self._retrieve_before_answer_generation(request)
+        if not self._settings.enable_rag_answer_generation:
+            record_rag_route("retrieval_ready", "llm")
+            raise rag_answer_generation_not_ready_error()
+        return await self._stream_rag_answer(request, result)
 
     async def _decide(self, request: ChatCompletionRequest):
         """Preserve a safe route marker when the decision service is unavailable."""
@@ -204,7 +173,7 @@ class RagRouterAnswerService:
     async def _retrieve_before_answer_generation(
         self,
         request: ChatCompletionRequest,
-    ) -> None:
+    ) -> RetrievalResult:
         """Run local retrieval or preserve the earlier fail-closed disabled behavior."""
         if not self._settings.enable_local_retrieval or self._retriever is None:
             record_rag_route("retrieval_pending", "llm")
@@ -223,14 +192,41 @@ class RagRouterAnswerService:
             fts_candidate_count=result.fts_candidate_count,
             duration_ms=(perf_counter() - started_at) * 1000,
         )
-        record_rag_route("retrieval_ready", "llm")
+        return result
 
+    async def _complete_rag_answer(
+        self,
+        request: ChatCompletionRequest,
+        result: RetrievalResult,
+    ) -> ChatCompletionResponse:
+        """Generate a non-streaming RAG answer without any direct-LLM fallback."""
+        generator = self._get_rag_generation_service()
+        record_rag_route("rag_no_evidence" if not result.hits else "rag_generation", "llm")
+        try:
+            return await generator.complete(request, result)
+        except LocalRagError:
+            record_rag_route("rag_generation_unavailable", "llm")
+            raise
 
-def _encode_sse_event(chunk: ChatCompletionChunk) -> bytes:
-    """Render a local chunk using the standard SSE data framing."""
-    return (
-        f"data: {chunk.model_dump_json()}\n\n".encode("utf-8")
-    )
+    async def _stream_rag_answer(
+        self,
+        request: ChatCompletionRequest,
+        result: RetrievalResult,
+    ) -> AsyncIterator[bytes]:
+        """Open RAG SSE only after all retrieval and prompt work has succeeded."""
+        generator = self._get_rag_generation_service()
+        record_rag_route("rag_no_evidence" if not result.hits else "rag_generation", "llm")
+        try:
+            return await generator.stream(request, result)
+        except LocalRagError:
+            record_rag_route("rag_generation_unavailable", "llm")
+            raise
+
+    def _get_rag_generation_service(self) -> RagGenerationService:
+        """Keep a missing enabled generation service fail-closed and diagnosable."""
+        if self._rag_generation_service is None:
+            raise rag_answer_generation_not_ready_error()
+        return self._rag_generation_service
 
 
 def get_answer_service(settings: Settings) -> AnswerService:

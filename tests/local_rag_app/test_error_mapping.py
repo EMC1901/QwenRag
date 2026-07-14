@@ -7,6 +7,7 @@ from local_rag_app.errors import (
     gateway_connection_error,
     missing_retrieval_query_error,
     rag_answer_generation_not_ready_error,
+    rag_context_build_error,
     rag_decision_unavailable_error,
     rag_knowledge_base_unavailable_error,
     rag_retrieval_unavailable_error,
@@ -86,6 +87,7 @@ def test_local_retrieval_errors_use_stable_safe_contracts() -> None:
         rag_knowledge_base_unavailable_error(),
         rag_retrieval_unavailable_error(),
         rag_answer_generation_not_ready_error(),
+        rag_context_build_error(),
     ]
 
     assert [
@@ -115,6 +117,12 @@ def test_local_retrieval_errors_use_stable_safe_contracts() -> None:
             "service_unavailable_error",
             "rag_answer_generation_not_ready",
             "Knowledge retrieval succeeded, but RAG answer generation is not ready",
+        ),
+        (
+            503,
+            "service_unavailable_error",
+            "rag_context_build_failed",
+            "The retrieved context could not be prepared safely",
         ),
     ]
 

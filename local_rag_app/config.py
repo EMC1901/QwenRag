@@ -45,6 +45,10 @@ class Settings(BaseSettings):
         default=False,
         alias="ENABLE_LOCAL_RETRIEVAL",
     )
+    enable_rag_answer_generation: bool = Field(
+        default=False,
+        alias="ENABLE_RAG_ANSWER_GENERATION",
+    )
     rag_router_max_tokens: int = Field(
         default=128,
         ge=32,
@@ -102,6 +106,53 @@ class Settings(BaseSettings):
     rag_allow_partial_index: bool = Field(
         default=False,
         alias="RAG_ALLOW_PARTIAL_INDEX",
+    )
+
+    rag_llm_context_window_tokens: int = Field(
+        default=8192,
+        gt=0,
+        alias="RAG_LLM_CONTEXT_WINDOW_TOKENS",
+    )
+    rag_max_input_tokens: int = Field(
+        default=6144,
+        gt=0,
+        alias="RAG_MAX_INPUT_TOKENS",
+    )
+    rag_max_output_tokens: int = Field(
+        default=1024,
+        gt=0,
+        alias="RAG_MAX_OUTPUT_TOKENS",
+    )
+    rag_token_safety_margin: int = Field(
+        default=1024,
+        ge=0,
+        alias="RAG_TOKEN_SAFETY_MARGIN",
+    )
+    rag_context_budget_tokens: int = Field(
+        default=4096,
+        gt=0,
+        alias="RAG_CONTEXT_BUDGET_TOKENS",
+    )
+    rag_history_budget_tokens: int = Field(
+        default=768,
+        ge=0,
+        alias="RAG_HISTORY_BUDGET_TOKENS",
+    )
+    rag_max_chunk_tokens: int = Field(
+        default=1024,
+        gt=0,
+        alias="RAG_MAX_CHUNK_TOKENS",
+    )
+    rag_min_chunk_tokens: int = Field(
+        default=64,
+        gt=0,
+        alias="RAG_MIN_CHUNK_TOKENS",
+    )
+    rag_generation_temperature: float = Field(
+        default=0.2,
+        ge=0,
+        le=2,
+        alias="RAG_GENERATION_TEMPERATURE",
     )
 
     http_connect_timeout_seconds: float = Field(
@@ -221,6 +272,35 @@ class Settings(BaseSettings):
         if retrieval_is_active and not self.upstream_embedding_model:
             raise ValueError(
                 "local retrieval requires: UPSTREAM_EMBEDDING_MODEL"
+            )
+        if self.enable_rag_answer_generation and not retrieval_is_active:
+            raise ValueError(
+                "RAG answer generation requires gateway mode, RAG router, and local retrieval"
+            )
+        if (
+            self.rag_max_input_tokens
+            + self.rag_max_output_tokens
+            + self.rag_token_safety_margin
+            > self.rag_llm_context_window_tokens
+        ):
+            raise ValueError(
+                "RAG input, output, and safety budgets exceed the LLM context window"
+            )
+        if self.rag_context_budget_tokens > self.rag_max_input_tokens:
+            raise ValueError(
+                "RAG_CONTEXT_BUDGET_TOKENS cannot exceed RAG_MAX_INPUT_TOKENS"
+            )
+        if self.rag_history_budget_tokens > self.rag_max_input_tokens:
+            raise ValueError(
+                "RAG_HISTORY_BUDGET_TOKENS cannot exceed RAG_MAX_INPUT_TOKENS"
+            )
+        if self.rag_max_chunk_tokens > self.rag_context_budget_tokens:
+            raise ValueError(
+                "RAG_MAX_CHUNK_TOKENS cannot exceed RAG_CONTEXT_BUDGET_TOKENS"
+            )
+        if self.rag_min_chunk_tokens > self.rag_max_chunk_tokens:
+            raise ValueError(
+                "RAG_MIN_CHUNK_TOKENS cannot exceed RAG_MAX_CHUNK_TOKENS"
             )
         if self.rag_final_top_k > self.rag_vector_top_k + self.rag_fts_top_k:
             raise ValueError(

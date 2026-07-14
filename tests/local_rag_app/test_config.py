@@ -16,7 +16,11 @@ def test_default_settings_are_safe() -> None:
     assert settings.local_rag_model == "local-rag"
     assert settings.local_rag_answer_mode == "stub"
     assert settings.enable_rag_router is False
+    assert settings.enable_rag_answer_generation is False
     assert settings.rag_router_max_tokens == 128
+    assert settings.rag_llm_context_window_tokens == 8192
+    assert settings.rag_max_input_tokens == 6144
+    assert settings.rag_max_output_tokens == 1024
     assert settings.local_rag_allow_no_auth is False
     assert settings.local_rag_api_keys == ["none"]
 
@@ -100,3 +104,86 @@ def test_app_can_be_created_without_routes() -> None:
     app = create_app()
 
     assert app.title == "QwenRag Local RAG App"
+
+
+def _generation_settings(**overrides: object) -> Settings:
+    """Create one valid settings object with every stage-7 prerequisite enabled."""
+    values: dict[str, object] = {
+        "LOCAL_RAG_ANSWER_MODE": "gateway",
+        "ENABLE_RAG_ROUTER": "true",
+        "ENABLE_LOCAL_RETRIEVAL": "true",
+        "ENABLE_RAG_ANSWER_GENERATION": "true",
+        "MODEL_GATEWAY_BASE_URL": "http://gateway.test:8010/v1",
+        "MODEL_GATEWAY_API_KEY": "test-key",
+        "UPSTREAM_LLM_MODEL": "qwen",
+        "_env_file": None,
+    }
+    values.update(overrides)
+    return Settings(**values)
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"LOCAL_RAG_ANSWER_MODE": "stub"},
+        {"ENABLE_RAG_ROUTER": "false"},
+        {"ENABLE_LOCAL_RETRIEVAL": "false"},
+    ],
+)
+def test_generation_requires_the_complete_rag_route(
+    overrides: dict[str, object],
+) -> None:
+    """Answer generation cannot be enabled without its gateway and retrieval inputs."""
+    with pytest.raises(ValidationError, match="RAG answer generation requires"):
+        _generation_settings(**overrides)
+
+
+def test_generation_accepts_complete_rag_route() -> None:
+    """The feature remains opt-in but loads once its complete route exists."""
+    settings = _generation_settings()
+
+    assert settings.enable_rag_answer_generation is True
+
+
+@pytest.mark.parametrize(
+    "overrides, message",
+    [
+        (
+            {
+                "RAG_MAX_INPUT_TOKENS": 7000,
+                "RAG_MAX_OUTPUT_TOKENS": 1000,
+                "RAG_TOKEN_SAFETY_MARGIN": 1000,
+            },
+            "budgets exceed",
+        ),
+        (
+            {"RAG_CONTEXT_BUDGET_TOKENS": 7000},
+            "CONTEXT_BUDGET_TOKENS",
+        ),
+        (
+            {"RAG_HISTORY_BUDGET_TOKENS": 7000},
+            "HISTORY_BUDGET_TOKENS",
+        ),
+        (
+            {
+                "RAG_CONTEXT_BUDGET_TOKENS": 1000,
+                "RAG_MAX_CHUNK_TOKENS": 1001,
+            },
+            "MAX_CHUNK_TOKENS",
+        ),
+        (
+            {
+                "RAG_MAX_CHUNK_TOKENS": 100,
+                "RAG_MIN_CHUNK_TOKENS": 101,
+            },
+            "MIN_CHUNK_TOKENS",
+        ),
+    ],
+)
+def test_rejects_inconsistent_rag_generation_budgets(
+    overrides: dict[str, object],
+    message: str,
+) -> None:
+    """Budget errors must be caught during startup, before any private prompt exists."""
+    with pytest.raises(ValidationError, match=message):
+        _generation_settings(**overrides)

@@ -30,6 +30,10 @@ _retrieval_context: ContextVar[dict[str, str] | None] = ContextVar(
     "retrieval_context",
     default=None,
 )
+_generation_context: ContextVar[dict[str, str] | None] = ContextVar(
+    "generation_context",
+    default=None,
+)
 _RAG_ROUTES = frozenset(
     {
         "router_disabled",
@@ -38,6 +42,9 @@ _RAG_ROUTES = frozenset(
         "retrieval_ready",
         "retrieval_unavailable",
         "decision_unavailable",
+        "rag_generation",
+        "rag_no_evidence",
+        "rag_generation_unavailable",
     }
 )
 _RAG_DECISION_SOURCES = frozenset({"", "llm", "fallback"})
@@ -110,6 +117,41 @@ def record_retrieval_failure(*, duration_ms: float) -> None:
     _record_retrieval_duration(duration_ms)
 
 
+def record_context_build_success(
+    *,
+    selected_hit_count: int,
+    dropped_hit_count: int,
+    estimated_input_tokens: int,
+    estimated_evidence_tokens: int,
+    estimated_history_tokens: int,
+    truncated_hit_count: int,
+) -> None:
+    """Attach only numeric context-build aggregates to the active request."""
+    values = {
+        "selected_hit_count": selected_hit_count,
+        "dropped_hit_count": dropped_hit_count,
+        "estimated_input_tokens": estimated_input_tokens,
+        "estimated_evidence_tokens": estimated_evidence_tokens,
+        "estimated_history_tokens": estimated_history_tokens,
+        "truncated_hit_count": truncated_hit_count,
+    }
+    for name, value in values.items():
+        _require_nonnegative_int(value, f"Context {name}")
+    context = _generation_context.get()
+    if context is not None:
+        context.update({name: str(value) for name, value in values.items()})
+
+
+def record_generation_success(*, stream: bool, duration_ms: float) -> None:
+    """Record safe generation mode and time after a completion or stream opens."""
+    _record_generation_metrics(stream=stream, duration_ms=duration_ms)
+
+
+def record_generation_failure(*, stream: bool, duration_ms: float) -> None:
+    """Retain safe timing data when generation cannot produce a response."""
+    _record_generation_metrics(stream=stream, duration_ms=duration_ms)
+
+
 def _record_retrieval_duration(duration_ms: float) -> None:
     if (
         isinstance(duration_ms, bool)
@@ -121,6 +163,35 @@ def _record_retrieval_duration(duration_ms: float) -> None:
     context = _retrieval_context.get()
     if context is not None:
         context["duration_ms"] = f"{duration_ms:.2f}"
+
+
+def _record_generation_metrics(*, stream: bool, duration_ms: float) -> None:
+    if not isinstance(stream, bool):
+        raise ValueError("Generation stream flag must be a boolean")
+    _require_nonnegative_duration(duration_ms, "Generation duration")
+    context = _generation_context.get()
+    if context is not None:
+        context.update(
+            {
+                "stream": str(stream).lower(),
+                "duration_ms": f"{duration_ms:.2f}",
+            }
+        )
+
+
+def _require_nonnegative_int(value: int, label: str) -> None:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise ValueError(f"{label} must be a non-negative integer")
+
+
+def _require_nonnegative_duration(duration_ms: float, label: str) -> None:
+    if (
+        isinstance(duration_ms, bool)
+        or not isinstance(duration_ms, Real)
+        or not isfinite(duration_ms)
+        or duration_ms < 0
+    ):
+        raise ValueError(f"{label} must be a finite non-negative number")
 
 
 def _resolve_request_id(request: Request) -> str:
@@ -153,6 +224,18 @@ def add_request_id_middleware(app: FastAPI) -> None:
                 "duration_ms": "",
             }
         )
+        generation_token = _generation_context.set(
+            {
+                "selected_hit_count": "",
+                "dropped_hit_count": "",
+                "estimated_input_tokens": "",
+                "estimated_evidence_tokens": "",
+                "estimated_history_tokens": "",
+                "truncated_hit_count": "",
+                "stream": "",
+                "duration_ms": "",
+            }
+        )
         started_at = perf_counter()
         response: Response | None = None
         try:
@@ -182,7 +265,11 @@ def add_request_id_middleware(app: FastAPI) -> None:
                 "client_host=%s answer_mode=%s rag_route=%s rag_decision_source=%s "
                 "retrieval_mode=%s retrieval_hit_count=%s "
                 "retrieval_vector_candidate_count=%s retrieval_fts_candidate_count=%s "
-                "retrieval_duration_ms=%s upstream_name=%s "
+                "retrieval_duration_ms=%s context_selected_hit_count=%s "
+                "context_dropped_hit_count=%s context_estimated_input_tokens=%s "
+                "context_estimated_evidence_tokens=%s context_estimated_history_tokens=%s "
+                "context_truncated_hit_count=%s generation_stream=%s "
+                "generation_duration_ms=%s upstream_name=%s "
                 "upstream_status_code=%s error_code=%s",
                 request_id,
                 request.method,
@@ -198,12 +285,21 @@ def add_request_id_middleware(app: FastAPI) -> None:
                 (_retrieval_context.get() or {}).get("vector_candidate_count", ""),
                 (_retrieval_context.get() or {}).get("fts_candidate_count", ""),
                 (_retrieval_context.get() or {}).get("duration_ms", ""),
+                (_generation_context.get() or {}).get("selected_hit_count", ""),
+                (_generation_context.get() or {}).get("dropped_hit_count", ""),
+                (_generation_context.get() or {}).get("estimated_input_tokens", ""),
+                (_generation_context.get() or {}).get("estimated_evidence_tokens", ""),
+                (_generation_context.get() or {}).get("estimated_history_tokens", ""),
+                (_generation_context.get() or {}).get("truncated_hit_count", ""),
+                (_generation_context.get() or {}).get("stream", ""),
+                (_generation_context.get() or {}).get("duration_ms", ""),
                 _upstream_name.get() or "",
                 _upstream_status_code.get() or "",
                 error_code,
             )
             _upstream_status_code.reset(upstream_status_token)
             _upstream_name.reset(upstream_name_token)
+            _generation_context.reset(generation_token)
             _retrieval_context.reset(retrieval_token)
             _rag_routing_context.reset(rag_routing_token)
             _request_id.reset(request_token)

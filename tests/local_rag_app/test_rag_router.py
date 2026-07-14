@@ -36,11 +36,13 @@ def _settings(
     answer_mode: str = "gateway",
     router_enabled: bool = True,
     retrieval_enabled: bool = False,
+    generation_enabled: bool = False,
 ) -> Settings:
     return Settings(
         LOCAL_RAG_ANSWER_MODE=answer_mode,
         ENABLE_RAG_ROUTER=router_enabled,
         ENABLE_LOCAL_RETRIEVAL=retrieval_enabled,
+        ENABLE_RAG_ANSWER_GENERATION=generation_enabled,
         MODEL_GATEWAY_BASE_URL="http://gateway.test:8010/v1",
         MODEL_GATEWAY_API_KEY="gateway-secret",
         UPSTREAM_LLM_MODEL="qwen",
@@ -97,24 +99,69 @@ class _FakeGatewayAnswerService:
 class _FakeRetriever:
     """Record stage-8 retrieval calls without loading assets or contacting a gateway."""
 
-    def __init__(self, error: LocalRagError | None = None) -> None:
+    def __init__(
+        self,
+        error: LocalRagError | None = None,
+        result: "_FakeRetrievalResult | None" = None,
+    ) -> None:
         self.error = error
+        self.result = result or _FakeRetrievalResult()
         self.queries: list[str] = []
 
     async def retrieve(self, query: str) -> "_FakeRetrievalResult":
         self.queries.append(query)
         if self.error is not None:
             raise self.error
-        return _FakeRetrievalResult()
+        return self.result
 
 
 class _FakeRetrievalResult:
     """Metric-only shape consumed by the stage-9 request-log integration."""
 
-    retrieval_mode = "hybrid"
-    hits = [object(), object()]
-    vector_candidate_count = 3
-    fts_candidate_count = 2
+    def __init__(self, *, hits: list[object] | None = None) -> None:
+        self.retrieval_mode = "hybrid"
+        self.hits = [object(), object()] if hits is None else hits
+        self.vector_candidate_count = 3
+        self.fts_candidate_count = 2
+
+
+class _FakeRagGenerationService:
+    """Record stage-7 generation calls without contacting a model gateway."""
+
+    def __init__(self, error: LocalRagError | None = None) -> None:
+        self.error = error
+        self.complete_calls: list[tuple[ChatCompletionRequest, _FakeRetrievalResult]] = []
+        self.stream_calls: list[tuple[ChatCompletionRequest, _FakeRetrievalResult]] = []
+
+    async def complete(
+        self,
+        request: ChatCompletionRequest,
+        result: _FakeRetrievalResult,
+    ) -> ChatCompletionResponse:
+        self.complete_calls.append((request, result))
+        if self.error is not None:
+            raise self.error
+        return ChatCompletionResponse(
+            id="chatcmpl-rag-test",
+            created=1,
+            model="local-rag",
+            choices=[CompletionChoice(message=AssistantMessage(content="rag answer"))],
+            usage=Usage(),
+        )
+
+    async def stream(
+        self,
+        request: ChatCompletionRequest,
+        result: _FakeRetrievalResult,
+    ) -> AsyncIterator[bytes]:
+        self.stream_calls.append((request, result))
+        if self.error is not None:
+            raise self.error
+        return self._events()
+
+    async def _events(self) -> AsyncIterator[bytes]:
+        yield b"data: rag answer\n\n"
+        yield b"data: [DONE]\n\n"
 
 
 @pytest.mark.asyncio
@@ -270,6 +317,83 @@ async def test_router_retrieves_before_streaming_and_returns_json_error_before_s
 
     assert error.value.code == "rag_answer_generation_not_ready"
     assert retriever.queries == ["测试问题"]
+    assert direct_service.stream_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_router_calls_rag_generation_after_successful_retrieval() -> None:
+    """The enabled stage-7 route passes the exact retrieval result to generation."""
+    direct_service = _FakeGatewayAnswerService()
+    retriever = _FakeRetriever()
+    generator = _FakeRagGenerationService()
+    service = RagRouterAnswerService(
+        _settings(retrieval_enabled=True, generation_enabled=True),
+        decision_service=_FakeDecisionService(
+            RagDecision(need_rag=True, reason_code="private_knowledge")
+        ),
+        gateway_answer_service=direct_service,
+        retriever=retriever,  # type: ignore[arg-type]
+        rag_generation_service=generator,  # type: ignore[arg-type]
+    )
+
+    response = await service.complete(_request())
+
+    assert response.choices[0].message.content == "rag answer"
+    assert retriever.queries == ["测试问题"]
+    assert generator.complete_calls == [(_request(), retriever.result)]
+    assert generator.stream_calls == []
+    assert direct_service.complete_calls == 0
+    assert direct_service.stream_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_router_opens_rag_generation_stream_after_successful_retrieval() -> None:
+    """The enabled stream path delegates to generation instead of direct LLM SSE."""
+    direct_service = _FakeGatewayAnswerService()
+    retriever = _FakeRetriever()
+    generator = _FakeRagGenerationService()
+    request = _request(stream=True)
+    service = RagRouterAnswerService(
+        _settings(retrieval_enabled=True, generation_enabled=True),
+        decision_service=_FakeDecisionService(
+            RagDecision(need_rag=True, reason_code="private_knowledge")
+        ),
+        gateway_answer_service=direct_service,
+        retriever=retriever,  # type: ignore[arg-type]
+        rag_generation_service=generator,  # type: ignore[arg-type]
+    )
+
+    stream = await service.stream(request)
+    body = b"".join([event async for event in stream])
+
+    assert body.endswith(b"data: [DONE]\n\n")
+    assert generator.stream_calls == [(request, retriever.result)]
+    assert generator.complete_calls == []
+    assert direct_service.complete_calls == 0
+    assert direct_service.stream_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_router_does_not_fallback_when_rag_generation_fails() -> None:
+    """Private-data generation failures remain visible instead of becoming direct answers."""
+    direct_service = _FakeGatewayAnswerService()
+    generator = _FakeRagGenerationService(rag_retrieval_unavailable_error())
+    service = RagRouterAnswerService(
+        _settings(retrieval_enabled=True, generation_enabled=True),
+        decision_service=_FakeDecisionService(
+            RagDecision(need_rag=True, reason_code="private_knowledge")
+        ),
+        gateway_answer_service=direct_service,
+        retriever=_FakeRetriever(),  # type: ignore[arg-type]
+        rag_generation_service=generator,  # type: ignore[arg-type]
+    )
+
+    with pytest.raises(LocalRagError) as error:
+        await service.complete(_request())
+
+    assert error.value.code == "rag_retrieval_unavailable"
+    assert len(generator.complete_calls) == 1
+    assert direct_service.complete_calls == 0
     assert direct_service.stream_calls == 0
 
 
@@ -482,3 +606,84 @@ def test_retrieval_failure_logs_only_route_and_duration_without_private_content(
     assert "retrieval_duration_ms=" in log_text
     assert private_prompt not in log_text
     assert local_key not in log_text
+
+
+def test_no_evidence_uses_generation_route_without_private_log_content(
+    monkeypatch,
+    caplog,
+) -> None:
+    """An empty successful retrieval reaches the local no-evidence generation path."""
+    private_prompt = "客户私有问题：编号-SECRET-NO-EVIDENCE"
+    retriever = _FakeRetriever(result=_FakeRetrievalResult(hits=[]))
+    generator = _FakeRagGenerationService()
+    service = RagRouterAnswerService(
+        _settings(retrieval_enabled=True, generation_enabled=True),
+        decision_service=_FakeDecisionService(
+            RagDecision(need_rag=True, reason_code="private_knowledge")
+        ),
+        gateway_answer_service=_FakeGatewayAnswerService(),
+        retriever=retriever,  # type: ignore[arg-type]
+        rag_generation_service=generator,  # type: ignore[arg-type]
+    )
+    monkeypatch.setattr(routes, "get_answer_service", lambda _: service)
+    caplog.set_level(logging.INFO, logger=LOGGER_NAME)
+
+    with TestClient(create_app()) as client:
+        response = client.post(
+            "/v1/chat/completions",
+            headers={"Authorization": "Bearer none"},
+            json={
+                "model": "local-rag",
+                "messages": [{"role": "user", "content": private_prompt}],
+                "stream": False,
+            },
+        )
+
+    log_text = "\n".join(record.getMessage() for record in caplog.records)
+    assert response.status_code == 200
+    assert response.json()["choices"][0]["message"]["content"] == "rag answer"
+    assert len(generator.complete_calls) == 1
+    assert "rag_route=rag_no_evidence" in log_text
+    assert private_prompt not in log_text
+
+
+def test_rag_generation_stream_failure_is_json_before_sse_and_never_falls_back(
+    monkeypatch,
+    caplog,
+) -> None:
+    """An expected generation failure happens before any streaming body is opened."""
+    private_prompt = "客户私有问题：编号-SECRET-GENERATION-FAIL"
+    direct_service = _FakeGatewayAnswerService()
+    generator = _FakeRagGenerationService(rag_retrieval_unavailable_error())
+    service = RagRouterAnswerService(
+        _settings(retrieval_enabled=True, generation_enabled=True),
+        decision_service=_FakeDecisionService(
+            RagDecision(need_rag=True, reason_code="private_knowledge")
+        ),
+        gateway_answer_service=direct_service,
+        retriever=_FakeRetriever(),  # type: ignore[arg-type]
+        rag_generation_service=generator,  # type: ignore[arg-type]
+    )
+    monkeypatch.setattr(routes, "get_answer_service", lambda _: service)
+    caplog.set_level(logging.INFO, logger=LOGGER_NAME)
+
+    with TestClient(create_app()) as client:
+        response = client.post(
+            "/v1/chat/completions",
+            headers={"Authorization": "Bearer none"},
+            json={
+                "model": "local-rag",
+                "messages": [{"role": "user", "content": private_prompt}],
+                "stream": True,
+            },
+        )
+
+    log_text = "\n".join(record.getMessage() for record in caplog.records)
+    assert response.status_code == 503
+    assert response.headers["content-type"] == "application/json; charset=utf-8"
+    assert response.json()["error"]["code"] == "rag_retrieval_unavailable"
+    assert len(generator.stream_calls) == 1
+    assert direct_service.complete_calls == 0
+    assert direct_service.stream_calls == 0
+    assert "rag_route=rag_generation_unavailable" in log_text
+    assert private_prompt not in log_text

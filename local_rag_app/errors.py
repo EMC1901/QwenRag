@@ -108,6 +108,14 @@ def rag_answer_generation_not_ready_error() -> LocalRagError:
     )
 
 
+def rag_context_build_error() -> LocalRagError:
+    """Hide unsafe prompt-construction details behind one stable RAG error."""
+    return service_not_ready_error(
+        "The retrieved context could not be prepared safely",
+        "rag_context_build_failed",
+    )
+
+
 def gateway_connection_error() -> LocalRagError:
     """Hide model-gateway connection details behind a stable local API error."""
     return LocalRagError(
