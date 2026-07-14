@@ -49,6 +49,10 @@ class Settings(BaseSettings):
         default=False,
         alias="ENABLE_RAG_ANSWER_GENERATION",
     )
+    enable_reference_display: bool = Field(
+        default=False,
+        alias="ENABLE_REFERENCE_DISPLAY",
+    )
     rag_router_max_tokens: int = Field(
         default=128,
         ge=32,
@@ -272,6 +276,12 @@ class Settings(BaseSettings):
         if retrieval_is_active and not self.upstream_embedding_model:
             raise ValueError(
                 "local retrieval requires: UPSTREAM_EMBEDDING_MODEL"
+            )
+        if self.enable_reference_display and (
+            not self.enable_rag_answer_generation or not retrieval_is_active
+        ):
+            raise ValueError(
+                "Reference display requires RAG answer generation and its complete route"
             )
         if self.enable_rag_answer_generation and not retrieval_is_active:
             raise ValueError(

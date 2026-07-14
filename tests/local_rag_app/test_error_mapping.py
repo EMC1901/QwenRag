@@ -12,6 +12,7 @@ from local_rag_app.errors import (
     rag_knowledge_base_unavailable_error,
     rag_retrieval_unavailable_error,
     rag_retrieval_not_ready_error,
+    reference_display_error,
 )
 from local_rag_app.main import create_app
 
@@ -88,6 +89,7 @@ def test_local_retrieval_errors_use_stable_safe_contracts() -> None:
         rag_retrieval_unavailable_error(),
         rag_answer_generation_not_ready_error(),
         rag_context_build_error(),
+        reference_display_error(),
     ]
 
     assert [
@@ -123,6 +125,12 @@ def test_local_retrieval_errors_use_stable_safe_contracts() -> None:
             "service_unavailable_error",
             "rag_context_build_failed",
             "The retrieved context could not be prepared safely",
+        ),
+        (
+            503,
+            "service_unavailable_error",
+            "reference_display_failed",
+            "The answer references could not be prepared safely",
         ),
     ]
 

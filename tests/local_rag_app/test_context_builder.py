@@ -270,6 +270,12 @@ def test_builder_enforces_the_final_input_budget_after_wrapper_overhead() -> Non
     assert built.estimated_context_tokens <= settings.rag_context_budget_tokens
 
 
+def test_system_prompt_delegates_reference_list_to_the_local_application() -> None:
+    """The model is told not to fabricate a source list that the app owns."""
+    assert "参考文件" in SYSTEM_PROMPT
+    assert "本地程序" in SYSTEM_PROMPT
+
+
 def test_builder_rejects_a_question_that_exceeds_the_complete_input_budget() -> None:
     """The current question is never silently truncated into a different request."""
     settings = _settings(

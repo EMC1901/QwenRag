@@ -116,6 +116,14 @@ def rag_context_build_error() -> LocalRagError:
     )
 
 
+def reference_display_error() -> LocalRagError:
+    """Hide source-formatting details when references cannot be prepared safely."""
+    return service_not_ready_error(
+        "The answer references could not be prepared safely",
+        "reference_display_failed",
+    )
+
+
 def gateway_connection_error() -> LocalRagError:
     """Hide model-gateway connection details behind a stable local API error."""
     return LocalRagError(

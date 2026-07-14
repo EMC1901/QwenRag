@@ -1,6 +1,7 @@
 """Privacy and diagnostic-field tests for stage 7 request logging."""
 
 import logging
+import json
 import re
 from collections.abc import AsyncIterator
 
@@ -11,8 +12,11 @@ from local_rag_app.answer_service import RagRouterAnswerService, StubAnswerServi
 from local_rag_app.config import Settings
 from local_rag_app.context_builder import ContextBuildError
 from local_rag_app.context_models import ContextBuildResult, SelectedContextHit
+from local_rag_app.errors import gateway_timeout_error
 from local_rag_app.rag_decision import RagDecision
 from local_rag_app.rag_generation import RagGenerationService
+from local_rag_app.reference_formatter import ReferenceFormatError
+from local_rag_app.reference_models import ReferenceBuildResult, ReferenceFile
 from local_rag_app.retrieval_models import RetrievalHit, RetrievalResult
 from local_rag_app.schemas import (
     AssistantMessage,
@@ -64,6 +68,12 @@ def test_request_log_has_diagnostic_fields_without_prompt_or_key(monkeypatch, ca
     assert "context_estimated_evidence_tokens= " in log_text
     assert "context_estimated_history_tokens= " in log_text
     assert "context_truncated_hit_count= " in log_text
+    assert "reference_display_enabled= " in log_text
+    assert "reference_appended= " in log_text
+    assert "reference_file_count= " in log_text
+    assert "reference_location_count= " in log_text
+    assert "reference_evidence_count= " in log_text
+    assert "reference_text_chars= " in log_text
     assert "generation_stream= " in log_text
     assert "generation_duration_ms= " in log_text
     assert "error_code=" in log_text
@@ -89,12 +99,13 @@ def test_authentication_failure_is_logged_with_error_code(caplog) -> None:
     assert "wrong-key-SECRET" not in log_text
 
 
-def _generation_settings() -> Settings:
+def _generation_settings(*, reference_display: bool = False) -> Settings:
     return Settings(
         LOCAL_RAG_ANSWER_MODE="gateway",
         ENABLE_RAG_ROUTER=True,
         ENABLE_LOCAL_RETRIEVAL=True,
         ENABLE_RAG_ANSWER_GENERATION=True,
+        ENABLE_REFERENCE_DISPLAY=reference_display,
         MODEL_GATEWAY_BASE_URL="http://gateway.test:8010/v1",
         MODEL_GATEWAY_API_KEY="gateway-key-SECRET",
         UPSTREAM_LLM_MODEL="qwen",
@@ -176,7 +187,12 @@ class _PrivateContextBuilder:
 
 
 class _PrivateGatewayAnswerService:
+    def __init__(self, error: Exception | None = None) -> None:
+        self.error = error
+
     async def complete(self, request: ChatCompletionRequest) -> ChatCompletionResponse:
+        if self.error is not None:
+            raise self.error
         return ChatCompletionResponse(
             id="chatcmpl-private",
             created=1,
@@ -190,29 +206,81 @@ class _PrivateGatewayAnswerService:
         )
 
     async def stream(self, request: ChatCompletionRequest) -> AsyncIterator[bytes]:
+        if self.error is not None:
+            raise self.error
         return self._events()
 
     async def _events(self) -> AsyncIterator[bytes]:
-        yield b"data: PRIVATE-ANSWER-SECRET-789\n\n"
+        metadata = {"id": "chatcmpl-private", "created": 1, "model": "local-rag"}
+        for choice in (
+            {"index": 0, "delta": {"role": "assistant"}, "finish_reason": None},
+            {
+                "index": 0,
+                "delta": {"content": "PRIVATE-ANSWER-SECRET-789"},
+                "finish_reason": None,
+            },
+            {"index": 0, "delta": {}, "finish_reason": "stop"},
+        ):
+            yield (
+                f"data: {json.dumps({**metadata, 'choices': [choice]})}\n\n"
+            ).encode("utf-8")
         yield b"data: [DONE]\n\n"
+
+
+class _PrivateReferenceFormatter:
+    """Return deliberately sensitive source text to prove logs retain only counts."""
+
+    def __init__(self, error: Exception | None = None) -> None:
+        self.error = error
+        self.calls: list[list[SelectedContextHit]] = []
+        self.result = ReferenceBuildResult(
+            section_text=(
+                "参考文件：\n[1] PRIVATE-FILENAME-SECRET.docx\n"
+                "    位置：C:\\PRIVATE-PATH-SECRET\\file.docx / PRIVATE-SECTION-SECRET\n"
+                "    对应资料：[资料1]"
+            ),
+            files=[
+                ReferenceFile(
+                    reference_no=1,
+                    display_name="PRIVATE-FILENAME-SECRET.docx",
+                    locations=[
+                        "C:\\PRIVATE-PATH-SECRET\\file.docx",
+                        "PRIVATE-SECTION-SECRET",
+                    ],
+                    evidence_nos=[1],
+                )
+            ],
+            selected_hit_count=1,
+            location_count=2,
+        )
+
+    def build(self, selected_hits: list[SelectedContextHit]) -> ReferenceBuildResult:
+        self.calls.append(selected_hits)
+        if self.error is not None:
+            raise self.error
+        return self.result
 
 
 def _generation_router(
     *,
     result: RetrievalResult | None = None,
     builder: _PrivateContextBuilder | None = None,
+    reference_display: bool = False,
+    formatter: _PrivateReferenceFormatter | None = None,
+    gateway: _PrivateGatewayAnswerService | None = None,
 ) -> RagRouterAnswerService:
-    settings = _generation_settings()
-    gateway = _PrivateGatewayAnswerService()
+    settings = _generation_settings(reference_display=reference_display)
+    active_gateway = gateway or _PrivateGatewayAnswerService()
     generation = RagGenerationService(
         settings,
         context_builder=builder or _PrivateContextBuilder(),  # type: ignore[arg-type]
-        gateway_answer_service=gateway,
+        gateway_answer_service=active_gateway,
+        reference_formatter=formatter,
     )
     return RagRouterAnswerService(
         settings,
         decision_service=_PrivateDecisionService(),  # type: ignore[arg-type]
-        gateway_answer_service=gateway,  # type: ignore[arg-type]
+        gateway_answer_service=active_gateway,  # type: ignore[arg-type]
         retriever=_PrivateRetriever(result or _private_result()),  # type: ignore[arg-type]
         rag_generation_service=generation,
     )
@@ -225,6 +293,9 @@ def _assert_generation_secrets_absent(log_text: str) -> None:
         "PRIVATE-ANSWER-SECRET-789",
         "PRIVATE-SYSTEM-PROMPT-SECRET",
         "gateway-key-SECRET",
+        "PRIVATE-FILENAME-SECRET.docx",
+        "C:\\PRIVATE-PATH-SECRET\\file.docx",
+        "PRIVATE-SECTION-SECRET",
     ):
         assert secret not in log_text
 
@@ -259,6 +330,12 @@ def test_rag_generation_logs_safe_context_aggregates_without_private_bodies(
     assert "context_estimated_evidence_tokens=222" in log_text
     assert "context_estimated_history_tokens=11" in log_text
     assert "context_truncated_hit_count=1" in log_text
+    assert "reference_display_enabled=false" in log_text
+    assert "reference_appended=false" in log_text
+    assert "reference_file_count=0" in log_text
+    assert "reference_location_count=0" in log_text
+    assert "reference_evidence_count=0" in log_text
+    assert "reference_text_chars=0" in log_text
     assert "generation_stream=false" in log_text
     assert re.search(r"generation_duration_ms=\d+\.\d{2}", log_text)
     _assert_generation_secrets_absent(log_text)
@@ -293,7 +370,10 @@ def test_stream_and_no_evidence_generation_logs_are_safe_and_do_not_leak_content
     _assert_generation_secrets_absent(first_log)
 
     caplog.clear()
-    no_evidence_service = _generation_router(result=_private_result(hits=[]))
+    no_evidence_service = _generation_router(
+        result=_private_result(hits=[]),
+        reference_display=True,
+    )
     monkeypatch.setattr(routes, "get_answer_service", lambda _: no_evidence_service)
     with TestClient(create_app()) as client:
         response = client.post(
@@ -311,8 +391,152 @@ def test_stream_and_no_evidence_generation_logs_are_safe_and_do_not_leak_content
     assert "rag_route=rag_no_evidence" in second_log
     assert "context_selected_hit_count=0" in second_log
     assert "context_dropped_hit_count=0" in second_log
+    assert "reference_display_enabled=true" in second_log
+    assert "reference_appended=false" in second_log
+    assert "reference_file_count=0" in second_log
+    assert "reference_location_count=0" in second_log
+    assert "reference_evidence_count=0" in second_log
+    assert "reference_text_chars=0" in second_log
     assert "generation_stream=false" in second_log
     _assert_generation_secrets_absent(second_log)
+
+
+def test_visible_references_log_only_aggregate_counts_for_normal_and_stream(
+    monkeypatch,
+    caplog,
+) -> None:
+    """Visible source text is returned to the client but never copied into logs."""
+    formatter = _PrivateReferenceFormatter()
+    service = _generation_router(reference_display=True, formatter=formatter)
+    monkeypatch.setattr(routes, "get_answer_service", lambda _: service)
+    caplog.set_level(logging.INFO, logger=LOGGER_NAME)
+
+    with TestClient(create_app()) as client:
+        response = client.post(
+            "/v1/chat/completions",
+            headers={"Authorization": "Bearer none", "X-Request-ID": "reference-log-1"},
+            json={
+                "model": "local-rag",
+                "messages": [{"role": "user", "content": "PRIVATE-QUESTION-SECRET-123"}],
+                "stream": False,
+            },
+        )
+
+    normal_log = "\n".join(record.getMessage() for record in caplog.records)
+    assert response.status_code == 200
+    assert formatter.result.section_text in response.json()["choices"][0]["message"]["content"]
+    assert len(formatter.calls) == 1
+    assert "request_id=reference-log-1" in normal_log
+    assert "reference_display_enabled=true" in normal_log
+    assert "reference_appended=true" in normal_log
+    assert "reference_file_count=1" in normal_log
+    assert "reference_location_count=2" in normal_log
+    assert "reference_evidence_count=1" in normal_log
+    assert f"reference_text_chars={len(formatter.result.section_text)}" in normal_log
+    _assert_generation_secrets_absent(normal_log)
+
+    caplog.clear()
+    stream_formatter = _PrivateReferenceFormatter()
+    stream_service = _generation_router(
+        reference_display=True,
+        formatter=stream_formatter,
+    )
+    monkeypatch.setattr(routes, "get_answer_service", lambda _: stream_service)
+    with TestClient(create_app()) as client:
+        with client.stream(
+            "POST",
+            "/v1/chat/completions",
+            headers={"Authorization": "Bearer none", "X-Request-ID": "reference-log-2"},
+            json={
+                "model": "local-rag",
+                "messages": [{"role": "user", "content": "PRIVATE-QUESTION-SECRET-123"}],
+                "stream": True,
+            },
+        ) as response:
+            stream_body = b"".join(response.iter_bytes()).decode("utf-8")
+
+    stream_log = "\n".join(record.getMessage() for record in caplog.records)
+    assert response.status_code == 200
+    assert "data: [DONE]" in stream_body
+    assert len(stream_formatter.calls) == 1
+    assert "request_id=reference-log-2" in stream_log
+    assert "reference_display_enabled=true" in stream_log
+    assert "reference_appended=true" in stream_log
+    assert "reference_file_count=1" in stream_log
+    assert "reference_location_count=2" in stream_log
+    assert "reference_evidence_count=1" in stream_log
+    assert f"reference_text_chars={len(stream_formatter.result.section_text)}" in stream_log
+    assert "generation_stream=true" in stream_log
+    _assert_generation_secrets_absent(stream_log)
+
+
+def test_reference_display_failures_log_zero_aggregates_without_source_details(
+    monkeypatch,
+    caplog,
+) -> None:
+    """Formatter and gateway failures never leak prepared source text or errors."""
+    formatter_failure = _PrivateReferenceFormatter(
+        ReferenceFormatError("PRIVATE-FORMATTER-SECRET")
+    )
+    service = _generation_router(
+        reference_display=True,
+        formatter=formatter_failure,
+    )
+    monkeypatch.setattr(routes, "get_answer_service", lambda _: service)
+    caplog.set_level(logging.INFO, logger=LOGGER_NAME)
+
+    with TestClient(create_app()) as client:
+        response = client.post(
+            "/v1/chat/completions",
+            headers={"Authorization": "Bearer none"},
+            json={
+                "model": "local-rag",
+                "messages": [{"role": "user", "content": "PRIVATE-QUESTION-SECRET-123"}],
+                "stream": False,
+            },
+        )
+
+    formatter_log = "\n".join(record.getMessage() for record in caplog.records)
+    assert response.status_code == 503
+    assert response.json()["error"]["code"] == "reference_display_failed"
+    assert "reference_display_enabled=true" in formatter_log
+    assert "reference_appended=false" in formatter_log
+    assert "reference_file_count=0" in formatter_log
+    assert "reference_location_count=0" in formatter_log
+    assert "reference_evidence_count=0" in formatter_log
+    assert "reference_text_chars=0" in formatter_log
+    assert "PRIVATE-FORMATTER-SECRET" not in formatter_log
+    _assert_generation_secrets_absent(formatter_log)
+
+    caplog.clear()
+    gateway_failure = _PrivateGatewayAnswerService(gateway_timeout_error())
+    service = _generation_router(
+        reference_display=True,
+        formatter=_PrivateReferenceFormatter(),
+        gateway=gateway_failure,
+    )
+    monkeypatch.setattr(routes, "get_answer_service", lambda _: service)
+    with TestClient(create_app()) as client:
+        response = client.post(
+            "/v1/chat/completions",
+            headers={"Authorization": "Bearer none"},
+            json={
+                "model": "local-rag",
+                "messages": [{"role": "user", "content": "PRIVATE-QUESTION-SECRET-123"}],
+                "stream": False,
+            },
+        )
+
+    gateway_log = "\n".join(record.getMessage() for record in caplog.records)
+    assert response.status_code == 504
+    assert response.json()["error"]["code"] == "gateway_timeout"
+    assert "reference_display_enabled=true" in gateway_log
+    assert "reference_appended=false" in gateway_log
+    assert "reference_file_count=0" in gateway_log
+    assert "reference_location_count=0" in gateway_log
+    assert "reference_evidence_count=0" in gateway_log
+    assert "reference_text_chars=0" in gateway_log
+    _assert_generation_secrets_absent(gateway_log)
 
 
 def test_generation_failure_logs_duration_without_private_context_or_error_detail(
@@ -383,6 +607,9 @@ def test_generation_log_context_resets_before_the_next_request(monkeypatch, capl
     assert first.status_code == second.status_code == 200
     assert len(request_logs) == 2
     assert "context_selected_hit_count=1" in request_logs[0]
+    assert "reference_display_enabled=false" in request_logs[0]
     assert "generation_stream=false" in request_logs[0]
     assert "context_selected_hit_count= " in request_logs[1]
+    assert "reference_display_enabled= " in request_logs[1]
+    assert "reference_appended= " in request_logs[1]
     assert "generation_stream= " in request_logs[1]

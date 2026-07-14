@@ -17,6 +17,7 @@ def test_default_settings_are_safe() -> None:
     assert settings.local_rag_answer_mode == "stub"
     assert settings.enable_rag_router is False
     assert settings.enable_rag_answer_generation is False
+    assert settings.enable_reference_display is False
     assert settings.rag_router_max_tokens == 128
     assert settings.rag_llm_context_window_tokens == 8192
     assert settings.rag_max_input_tokens == 6144
@@ -143,6 +144,32 @@ def test_generation_accepts_complete_rag_route() -> None:
     settings = _generation_settings()
 
     assert settings.enable_rag_answer_generation is True
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"LOCAL_RAG_ANSWER_MODE": "stub"},
+        {"ENABLE_RAG_ROUTER": "false"},
+        {"ENABLE_LOCAL_RETRIEVAL": "false"},
+        {"ENABLE_RAG_ANSWER_GENERATION": "false"},
+    ],
+)
+def test_reference_display_requires_rag_answer_generation_route(
+    overrides: dict[str, object],
+) -> None:
+    """Reference display is only meaningful after the complete RAG route is ready."""
+    overrides["ENABLE_REFERENCE_DISPLAY"] = "true"
+
+    with pytest.raises(ValidationError, match="Reference display requires"):
+        _generation_settings(**overrides)
+
+
+def test_reference_display_accepts_complete_rag_route() -> None:
+    """Reference display remains opt-in after every prerequisite is enabled."""
+    settings = _generation_settings(ENABLE_REFERENCE_DISPLAY="true")
+
+    assert settings.enable_reference_display is True
 
 
 @pytest.mark.parametrize(

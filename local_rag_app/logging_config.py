@@ -142,6 +142,47 @@ def record_context_build_success(
         context.update({name: str(value) for name, value in values.items()})
 
 
+def record_reference_display(
+    *,
+    enabled: bool,
+    appended: bool,
+    file_count: int,
+    location_count: int,
+    evidence_count: int,
+    text_chars: int,
+) -> None:
+    """Attach reference-display aggregates without retaining any source content.
+
+    For a streaming response, ``appended`` means the local reference wrapper has
+    been attached to the returned SSE iterator.  It does not claim that a client
+    has consumed the complete iterator.
+    """
+    if not isinstance(enabled, bool) or not isinstance(appended, bool):
+        raise ValueError("Reference display flags must be booleans")
+    if appended and not enabled:
+        raise ValueError("Disabled reference display cannot append references")
+    values = {
+        "file_count": file_count,
+        "location_count": location_count,
+        "evidence_count": evidence_count,
+        "text_chars": text_chars,
+    }
+    for name, value in values.items():
+        _require_nonnegative_int(value, f"Reference {name}")
+    if not appended and any(values.values()):
+        raise ValueError("Unappended references cannot report source aggregates")
+
+    context = _generation_context.get()
+    if context is not None:
+        context.update(
+            {
+                "reference_display_enabled": str(enabled).lower(),
+                "reference_appended": str(appended).lower(),
+                **{f"reference_{name}": str(value) for name, value in values.items()},
+            }
+        )
+
+
 def record_generation_success(*, stream: bool, duration_ms: float) -> None:
     """Record safe generation mode and time after a completion or stream opens."""
     _record_generation_metrics(stream=stream, duration_ms=duration_ms)
@@ -232,6 +273,12 @@ def add_request_id_middleware(app: FastAPI) -> None:
                 "estimated_evidence_tokens": "",
                 "estimated_history_tokens": "",
                 "truncated_hit_count": "",
+                "reference_display_enabled": "",
+                "reference_appended": "",
+                "reference_file_count": "",
+                "reference_location_count": "",
+                "reference_evidence_count": "",
+                "reference_text_chars": "",
                 "stream": "",
                 "duration_ms": "",
             }
@@ -268,7 +315,10 @@ def add_request_id_middleware(app: FastAPI) -> None:
                 "retrieval_duration_ms=%s context_selected_hit_count=%s "
                 "context_dropped_hit_count=%s context_estimated_input_tokens=%s "
                 "context_estimated_evidence_tokens=%s context_estimated_history_tokens=%s "
-                "context_truncated_hit_count=%s generation_stream=%s "
+                "context_truncated_hit_count=%s reference_display_enabled=%s "
+                "reference_appended=%s reference_file_count=%s "
+                "reference_location_count=%s reference_evidence_count=%s "
+                "reference_text_chars=%s generation_stream=%s "
                 "generation_duration_ms=%s upstream_name=%s "
                 "upstream_status_code=%s error_code=%s",
                 request_id,
@@ -291,6 +341,12 @@ def add_request_id_middleware(app: FastAPI) -> None:
                 (_generation_context.get() or {}).get("estimated_evidence_tokens", ""),
                 (_generation_context.get() or {}).get("estimated_history_tokens", ""),
                 (_generation_context.get() or {}).get("truncated_hit_count", ""),
+                (_generation_context.get() or {}).get("reference_display_enabled", ""),
+                (_generation_context.get() or {}).get("reference_appended", ""),
+                (_generation_context.get() or {}).get("reference_file_count", ""),
+                (_generation_context.get() or {}).get("reference_location_count", ""),
+                (_generation_context.get() or {}).get("reference_evidence_count", ""),
+                (_generation_context.get() or {}).get("reference_text_chars", ""),
                 (_generation_context.get() or {}).get("stream", ""),
                 (_generation_context.get() or {}).get("duration_ms", ""),
                 _upstream_name.get() or "",
