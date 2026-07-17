@@ -16,6 +16,25 @@ import numpy as np
 
 from local_rag_app.config import Settings
 from rag_preprocess.faiss_builder import load_faiss_index
+from rag_preprocess.incremental.manifest import ManifestError, layer_directory, load_manifest, sha256_file
+
+
+def _resolve_generation_root(root: Path) -> Path:
+    """Use an atomically published relative generation pointer when present."""
+    pointer = root / "current_generation.txt"
+    if not pointer.is_file():
+        return root
+    try:
+        value = pointer.read_text(encoding="utf-8-sig").strip()
+        candidate = Path(value)
+        if not value or candidate.is_absolute():
+            raise ValueError
+        resolved = (root / candidate).resolve(strict=True)
+        resolved.relative_to(root.resolve(strict=True))
+        return resolved
+    except (OSError, ValueError):
+        # A malformed pointer must never redirect reads outside the deployed KB.
+        raise KnowledgeBaseLoadError()
 
 
 class KnowledgeBaseLoadError(RuntimeError):
@@ -49,6 +68,20 @@ class IndexMetadata:
     vector_normalized: bool
     vector_count: int
     is_partial_embedding_index: bool
+
+
+@dataclass(frozen=True)
+class _LoadedLayer:
+    """One validated Base or Delta asset set in a published manifest."""
+
+    root: Path
+    metadata_db_path: Path
+    index_path: Path
+    index_meta_path: Path
+    index: Any
+    metadata: IndexMetadata
+    is_delta: bool
+    has_document_extension: bool = False
 
 
 @dataclass(frozen=True)
@@ -96,6 +129,7 @@ class VectorSearchHit:
     vector_id: int
     vector_score: float
     vector_rank: int
+    extension: str | None = None
 
 
 @dataclass(frozen=True)
@@ -114,6 +148,7 @@ class ChunkMetadata:
     paragraph_start: int | None
     paragraph_end: int | None
     vector_id: int | None
+    extension: str | None = None
 
 
 _REQUIRED_TABLE_COLUMNS = {
@@ -450,13 +485,17 @@ class KnowledgeBase:
     ) -> None:
         self._settings = settings
         self._faiss_loader = faiss_loader
-        self._metadata_db_path = settings.rag_knowledge_base_dir / "metadata.db"
-        self._index_path = settings.rag_knowledge_base_dir / "vector_index" / "index.faiss"
+        asset_root = _resolve_generation_root(settings.rag_knowledge_base_dir)
+        self._metadata_db_path = asset_root / "metadata.db"
+        self._index_path = asset_root / "vector_index" / "index.faiss"
         self._index_meta_path = (
-            settings.rag_knowledge_base_dir / "vector_index" / "index.meta.json"
+            asset_root / "vector_index" / "index.meta.json"
         )
         self._index: Any | None = None
         self._index_metadata: IndexMetadata | None = None
+        self._layers: tuple[_LoadedLayer, ...] = ()
+        self._tombstoned_chunk_ids: frozenset[str] = frozenset()
+        self._tombstoned_vector_ids: frozenset[int] = frozenset()
         self._ready = False
 
     @property
@@ -484,11 +523,10 @@ class KnowledgeBase:
             return
 
         try:
-            self._validate_asset_files()
-            metadata = self._load_index_metadata()
-            self._validate_sqlite(metadata)
-            index = self._faiss_loader(self._index_path)
-            self._validate_faiss_index(index, metadata)
+            layers = self._load_published_layers()
+            self._validate_layer_compatibility(layers)
+            tombstoned_chunks, tombstoned_vectors = self._load_tombstones(layers)
+            self._validate_cross_layer_ids(layers, tombstoned_chunks, tombstoned_vectors)
         except KnowledgeBaseLoadError:
             self.close()
             raise
@@ -503,14 +541,23 @@ class KnowledgeBase:
             self.close()
             raise KnowledgeBaseLoadError() from exc
 
-        self._index = index
-        self._index_metadata = metadata
+        self._layers = layers
+        self._index = layers[0].index
+        self._index_metadata = layers[0].metadata
+        self._metadata_db_path = layers[0].metadata_db_path
+        self._index_path = layers[0].index_path
+        self._index_meta_path = layers[0].index_meta_path
+        self._tombstoned_chunk_ids = frozenset(tombstoned_chunks)
+        self._tombstoned_vector_ids = frozenset(tombstoned_vectors)
         self._ready = True
 
     def close(self) -> None:
         """Release in-process index references and mark this instance not ready."""
         self._index = None
         self._index_metadata = None
+        self._layers = ()
+        self._tombstoned_chunk_ids = frozenset()
+        self._tombstoned_vector_ids = frozenset()
         self._ready = False
 
     @contextmanager
@@ -518,7 +565,7 @@ class KnowledgeBase:
         """Open a short-lived SQLite connection that cannot mutate delivered assets."""
         if not self._ready:
             raise RuntimeError("Knowledge base is not ready")
-        connection = self._connect_readonly()
+        connection = self._connect_readonly(self._metadata_db_path)
         try:
             yield connection
         finally:
@@ -568,24 +615,27 @@ class KnowledgeBase:
             return []
 
         try:
-            with self.open_readonly_connection() as connection:
-                rows: Sequence[sqlite3.Row] = []
-                queries = [query_plan.strict_query]
-                if query_plan.relaxed_query is not None:
-                    queries.append(query_plan.relaxed_query)
-                for fts_query in queries:
-                    rows = connection.execute(
-                        """
-                        SELECT chunk_id, bm25(chunk_fts) AS bm25_score
-                        FROM chunk_fts
-                        WHERE chunk_fts MATCH ?
-                        ORDER BY bm25_score ASC, chunk_id ASC
-                        LIMIT ?
-                        """,
-                        (fts_query, int(top_k)),
-                    ).fetchall()
-                    if rows:
-                        break
+            rows: list[sqlite3.Row] = []
+            queries = [query_plan.strict_query]
+            if query_plan.relaxed_query is not None:
+                queries.append(query_plan.relaxed_query)
+            for layer in self._layers:
+                with self._open_layer_connection(layer) as connection:
+                    layer_rows: Sequence[sqlite3.Row] = []
+                    for fts_query in queries:
+                        layer_rows = connection.execute(
+                            """
+                            SELECT chunk_id, bm25(chunk_fts) AS bm25_score
+                            FROM chunk_fts
+                            WHERE chunk_fts MATCH ?
+                            ORDER BY bm25_score ASC, chunk_id ASC
+                            LIMIT ?
+                            """,
+                            (fts_query, int(top_k)),
+                        ).fetchall()
+                        if layer_rows:
+                            break
+                    rows.extend(layer_rows)
         except sqlite3.OperationalError as exc:
             if _is_recoverable_fts_error(exc):
                 raise FtsSearchFallbackError() from exc
@@ -593,11 +643,15 @@ class KnowledgeBase:
         except sqlite3.DatabaseError as exc:
             raise KnowledgeBaseQueryError() from exc
 
-        candidates: list[FtsSearchCandidate] = []
+        ranked_rows: list[tuple[str, float]] = []
         seen_chunk_ids: set[str] = set()
         for row in rows:
             chunk_id = row["chunk_id"]
-            if not isinstance(chunk_id, str) or not chunk_id or chunk_id in seen_chunk_ids:
+            if not isinstance(chunk_id, str) or not chunk_id:
+                raise KnowledgeBaseQueryError()
+            if chunk_id in self._tombstoned_chunk_ids:
+                continue
+            if chunk_id in seen_chunk_ids:
                 raise KnowledgeBaseQueryError()
             try:
                 bm25_score = float(row["bm25_score"])
@@ -606,14 +660,12 @@ class KnowledgeBase:
             if not np.isfinite(bm25_score):
                 raise KnowledgeBaseQueryError()
             seen_chunk_ids.add(chunk_id)
-            candidates.append(
-                FtsSearchCandidate(
-                    chunk_id=chunk_id,
-                    bm25_score=bm25_score,
-                    fts_rank=len(candidates) + 1,
-                )
-            )
-        return candidates
+            ranked_rows.append((chunk_id, bm25_score))
+        ranked_rows.sort(key=lambda value: (value[1], value[0]))
+        return [
+            FtsSearchCandidate(chunk_id=chunk_id, bm25_score=score, fts_rank=index + 1)
+            for index, (chunk_id, score) in enumerate(ranked_rows[:top_k])
+        ]
 
     def search_vector_candidates(
         self,
@@ -624,44 +676,41 @@ class KnowledgeBase:
         if isinstance(top_k, bool) or not isinstance(top_k, Integral) or top_k <= 0:
             raise KnowledgeBaseQueryError()
         query_matrix = self.prepare_query_vector(query_vector)
-        try:
-            scores, vector_ids = self.index.search(query_matrix, int(top_k))
-        except (TypeError, ValueError, RuntimeError) as exc:
-            raise KnowledgeBaseQueryError() from exc
-
-        score_matrix = np.asarray(scores)
-        id_matrix = np.asarray(vector_ids)
-        if (
-            score_matrix.ndim != 2
-            or id_matrix.ndim != 2
-            or score_matrix.shape[0] != 1
-            or score_matrix.shape != id_matrix.shape
-        ):
-            raise KnowledgeBaseQueryError()
-
-        candidates: list[VectorSearchCandidate] = []
+        raw_candidates: list[tuple[int, float]] = []
         seen_vector_ids: set[int] = set()
-        for raw_score, raw_vector_id in zip(score_matrix[0], id_matrix[0]):
-            if isinstance(raw_vector_id, bool) or not isinstance(raw_vector_id, Integral):
-                raise KnowledgeBaseQueryError()
-            vector_id = int(raw_vector_id)
-            if vector_id < 0:
-                continue
+        for layer in self._layers:
             try:
-                score = float(raw_score)
-            except (TypeError, ValueError, OverflowError) as exc:
+                scores, vector_ids = layer.index.search(query_matrix, int(top_k))
+            except (TypeError, ValueError, RuntimeError) as exc:
                 raise KnowledgeBaseQueryError() from exc
-            if not np.isfinite(score) or vector_id in seen_vector_ids:
+            score_matrix = np.asarray(scores)
+            id_matrix = np.asarray(vector_ids)
+            if (
+                score_matrix.ndim != 2
+                or id_matrix.ndim != 2
+                or score_matrix.shape[0] != 1
+                or score_matrix.shape != id_matrix.shape
+            ):
                 raise KnowledgeBaseQueryError()
-            seen_vector_ids.add(vector_id)
-            candidates.append(
-                VectorSearchCandidate(
-                    vector_id=vector_id,
-                    vector_score=score,
-                    vector_rank=len(candidates) + 1,
-                )
-            )
-        return candidates
+            for raw_score, raw_vector_id in zip(score_matrix[0], id_matrix[0]):
+                if isinstance(raw_vector_id, bool) or not isinstance(raw_vector_id, Integral):
+                    raise KnowledgeBaseQueryError()
+                vector_id = int(raw_vector_id)
+                if vector_id < 0 or vector_id in self._tombstoned_vector_ids:
+                    continue
+                try:
+                    score = float(raw_score)
+                except (TypeError, ValueError, OverflowError) as exc:
+                    raise KnowledgeBaseQueryError() from exc
+                if not np.isfinite(score) or vector_id in seen_vector_ids:
+                    raise KnowledgeBaseQueryError()
+                seen_vector_ids.add(vector_id)
+                raw_candidates.append((vector_id, score))
+        raw_candidates.sort(key=lambda value: (-value[1], value[0]))
+        return [
+            VectorSearchCandidate(vector_id=vector_id, vector_score=score, vector_rank=index + 1)
+            for index, (vector_id, score) in enumerate(raw_candidates[:top_k])
+        ]
 
     def load_vector_hits(
         self,
@@ -675,37 +724,41 @@ class KnowledgeBase:
         vector_ids = [candidate.vector_id for candidate in candidates]
         if len(set(vector_ids)) != len(vector_ids):
             raise KnowledgeBaseQueryError()
-        placeholders = ", ".join("?" for _ in vector_ids)
-        query = f"""
-            SELECT c.chunk_id,
-                   c.doc_id,
-                   c.chunk_text,
-                   c.title,
-                   c.section_path,
-                   c.article_no,
-                   c.article_range,
-                   c.paragraph_start,
-                   c.paragraph_end,
-                   c.vector_id,
-                   d.title AS doc_title,
-                   d.relative_path
-            FROM chunks c
-            JOIN documents d ON d.doc_id = c.doc_id
-            WHERE c.vector_id IN ({placeholders})
-              AND c.embedding_status = 'success'
-        """
-        with self.open_readonly_connection() as connection:
-            rows = connection.execute(query, vector_ids).fetchall()
-
         rows_by_vector_id: dict[int, sqlite3.Row] = {}
-        for row in rows:
-            value = row["vector_id"]
-            if isinstance(value, bool) or not isinstance(value, int):
-                raise KnowledgeBaseQueryError()
-            vector_id = int(value)
-            if vector_id in rows_by_vector_id:
-                raise KnowledgeBaseQueryError()
-            rows_by_vector_id[vector_id] = row
+        for layer in self._layers:
+            placeholders = ", ".join("?" for _ in vector_ids)
+            extension_column = "d.extension AS extension" if layer.has_document_extension else "NULL AS extension"
+            query = f"""
+                SELECT c.chunk_id,
+                       c.doc_id,
+                       c.chunk_text,
+                       c.title,
+                       c.section_path,
+                       c.article_no,
+                       c.article_range,
+                       c.paragraph_start,
+                       c.paragraph_end,
+                       c.vector_id,
+                       d.title AS doc_title,
+                       d.relative_path,
+                       {extension_column}
+                FROM chunks c
+                JOIN documents d ON d.doc_id = c.doc_id
+                WHERE c.vector_id IN ({placeholders})
+                  AND c.embedding_status = 'success'
+            """
+            with self._open_layer_connection(layer) as connection:
+                rows = connection.execute(query, vector_ids).fetchall()
+            for row in rows:
+                value = row["vector_id"]
+                if isinstance(value, bool) or not isinstance(value, int):
+                    raise KnowledgeBaseQueryError()
+                vector_id = int(value)
+                if vector_id in self._tombstoned_vector_ids:
+                    continue
+                if vector_id in rows_by_vector_id:
+                    raise KnowledgeBaseQueryError()
+                rows_by_vector_id[vector_id] = row
 
         hits: list[VectorSearchHit] = []
         for candidate in candidates:
@@ -728,33 +781,37 @@ class KnowledgeBase:
         if len(set(chunk_ids)) != len(chunk_ids):
             raise KnowledgeBaseQueryError()
 
-        placeholders = ", ".join("?" for _ in chunk_ids)
-        query = f"""
-            SELECT c.chunk_id,
-                   c.doc_id,
-                   c.chunk_text,
-                   c.title,
-                   c.section_path,
-                   c.article_no,
-                   c.article_range,
-                   c.paragraph_start,
-                   c.paragraph_end,
-                   c.vector_id,
-                   d.title AS doc_title,
-                   d.relative_path
-            FROM chunks c
-            JOIN documents d ON d.doc_id = c.doc_id
-            WHERE c.chunk_id IN ({placeholders})
-        """
-        with self.open_readonly_connection() as connection:
-            rows = connection.execute(query, list(chunk_ids)).fetchall()
-
         metadata_by_chunk_id: dict[str, ChunkMetadata] = {}
-        for row in rows:
-            metadata = _chunk_metadata_from_row(row)
-            if metadata.chunk_id in metadata_by_chunk_id:
-                raise KnowledgeBaseQueryError()
-            metadata_by_chunk_id[metadata.chunk_id] = metadata
+        for layer in self._layers:
+            placeholders = ", ".join("?" for _ in chunk_ids)
+            extension_column = "d.extension AS extension" if layer.has_document_extension else "NULL AS extension"
+            query = f"""
+                SELECT c.chunk_id,
+                       c.doc_id,
+                       c.chunk_text,
+                       c.title,
+                       c.section_path,
+                       c.article_no,
+                       c.article_range,
+                       c.paragraph_start,
+                       c.paragraph_end,
+                       c.vector_id,
+                       d.title AS doc_title,
+                       d.relative_path,
+                       {extension_column}
+                FROM chunks c
+                JOIN documents d ON d.doc_id = c.doc_id
+                WHERE c.chunk_id IN ({placeholders})
+            """
+            with self._open_layer_connection(layer) as connection:
+                rows = connection.execute(query, list(chunk_ids)).fetchall()
+            for row in rows:
+                metadata = _chunk_metadata_from_row(row)
+                if metadata.chunk_id in self._tombstoned_chunk_ids:
+                    continue
+                if metadata.chunk_id in metadata_by_chunk_id:
+                    raise KnowledgeBaseQueryError()
+                metadata_by_chunk_id[metadata.chunk_id] = metadata
         if len(metadata_by_chunk_id) != len(chunk_ids):
             raise KnowledgeBaseQueryError()
         return metadata_by_chunk_id
@@ -764,19 +821,64 @@ class KnowledgeBase:
             raise KnowledgeBaseQueryError()
         return self._index_metadata
 
-    def _validate_asset_files(self) -> None:
-        for path in (
-            self._metadata_db_path,
-            self._index_path,
-            self._index_meta_path,
-        ):
+    def _load_published_layers(self) -> tuple[_LoadedLayer, ...]:
+        root = self._settings.rag_knowledge_base_dir
+        try:
+            manifest = load_manifest(root)
+            if manifest is None:
+                layer_roots = [(_resolve_generation_root(root), False, None)]
+            else:
+                layer_roots = [(layer_directory(root, manifest.base), False, manifest.base.meta_sha256)]
+                layer_roots.extend(
+                    (layer_directory(root, layer), True, layer.meta_sha256)
+                    for layer in manifest.deltas
+                )
+        except (ManifestError, OSError, ValueError) as exc:
+            raise KnowledgeBaseLoadError() from exc
+
+        layers: list[_LoadedLayer] = []
+        for layer_root, is_delta, expected_meta_sha256 in layer_roots:
+            database = layer_root / ("delta.db" if is_delta else "metadata.db")
+            index = layer_root / "vector_index" / "index.faiss"
+            index_meta = layer_root / "vector_index" / "index.meta.json"
+            delta_meta = layer_root / "delta.meta.json" if is_delta else None
+            self._validate_asset_files(database, index, index_meta, delta_meta)
+            if expected_meta_sha256 is not None:
+                meta_path = delta_meta if is_delta else layer_root / "generation.meta.json"
+                if meta_path is None or not meta_path.is_file() or sha256_file(meta_path) != expected_meta_sha256:
+                    raise KnowledgeBaseLoadError()
+            metadata = self._load_index_metadata(index_meta, allow_delta_partial=is_delta)
+            self._validate_sqlite(database, metadata)
+            has_document_extension = self._database_has_document_extension(database)
+            loaded_index = self._faiss_loader(index)
+            self._validate_faiss_index(loaded_index, metadata)
+            layers.append(
+                _LoadedLayer(
+                    layer_root,
+                    database,
+                    index,
+                    index_meta,
+                    loaded_index,
+                    metadata,
+                    is_delta,
+                    has_document_extension,
+                )
+            )
+        if not layers:
+            raise KnowledgeBaseLoadError()
+        return tuple(layers)
+
+    def _validate_asset_files(self, *paths: Path | None) -> None:
+        for path in paths:
+            if path is None:
+                continue
             if not path.is_file():
                 raise KnowledgeBaseLoadError()
             with path.open("rb"):
                 pass
 
-    def _load_index_metadata(self) -> IndexMetadata:
-        with self._index_meta_path.open("r", encoding="utf-8") as file:
+    def _load_index_metadata(self, path: Path, *, allow_delta_partial: bool) -> IndexMetadata:
+        with path.open("r", encoding="utf-8") as file:
             raw_metadata = json.load(file)
         if not isinstance(raw_metadata, dict):
             raise KnowledgeBaseLoadError()
@@ -796,7 +898,7 @@ class KnowledgeBase:
             raise KnowledgeBaseLoadError()
         if not vector_normalized:
             raise KnowledgeBaseLoadError()
-        if is_partial and not self._settings.rag_allow_partial_index:
+        if is_partial and not (allow_delta_partial or self._settings.rag_allow_partial_index):
             raise KnowledgeBaseLoadError()
 
         return IndexMetadata(
@@ -808,8 +910,8 @@ class KnowledgeBase:
             is_partial_embedding_index=is_partial,
         )
 
-    def _validate_sqlite(self, metadata: IndexMetadata) -> None:
-        connection = self._connect_readonly()
+    def _validate_sqlite(self, database: Path, metadata: IndexMetadata) -> None:
+        connection = self._connect_readonly(database)
         try:
             self._validate_quick_check(connection)
             self._validate_schema(connection)
@@ -817,11 +919,35 @@ class KnowledgeBase:
         finally:
             connection.close()
 
-    def _connect_readonly(self) -> sqlite3.Connection:
-        uri = self._metadata_db_path.resolve().as_uri() + "?mode=ro"
+    def _database_has_document_extension(self, database: Path) -> bool:
+        """Keep older delivered databases readable while newer ones expose extension."""
+        connection = self._connect_readonly(database)
+        try:
+            columns = {
+                str(row[1]) for row in connection.execute("PRAGMA table_info([documents])")
+            }
+            return "extension" in columns
+        finally:
+            connection.close()
+
+    def _connect_readonly(self, database: Path) -> sqlite3.Connection:
+        uri = database.resolve().as_uri() + "?mode=ro"
         connection = sqlite3.connect(uri, uri=True, check_same_thread=False)
         connection.row_factory = sqlite3.Row
         return connection
+
+    @contextmanager
+    def _open_layer_connection(self, layer: _LoadedLayer) -> Iterator[sqlite3.Connection]:
+        """Preserve the legacy single-layer connection seam for tests/callers."""
+        if len(self._layers) == 1 and layer.metadata_db_path == self._metadata_db_path:
+            with self.open_readonly_connection() as connection:
+                yield connection
+            return
+        connection = self._connect_readonly(layer.metadata_db_path)
+        try:
+            yield connection
+        finally:
+            connection.close()
 
     @staticmethod
     def _validate_quick_check(connection: sqlite3.Connection) -> None:
@@ -886,6 +1012,63 @@ class KnowledgeBase:
         ):
             raise KnowledgeBaseLoadError()
 
+    @staticmethod
+    def _validate_layer_compatibility(layers: Sequence[_LoadedLayer]) -> None:
+        baseline = layers[0].metadata
+        for layer in layers[1:]:
+            metadata = layer.metadata
+            if (
+                metadata.embedding_model != baseline.embedding_model
+                or metadata.embedding_dim != baseline.embedding_dim
+                or metadata.vector_metric != baseline.vector_metric
+                or metadata.vector_normalized != baseline.vector_normalized
+                or not metadata.is_partial_embedding_index
+            ):
+                raise KnowledgeBaseLoadError()
+
+    @staticmethod
+    def _load_tombstones(layers: Sequence[_LoadedLayer]) -> tuple[set[str], set[int]]:
+        chunks: set[str] = set()
+        vectors: set[int] = set()
+        for layer in layers:
+            if not layer.is_delta:
+                continue
+            with sqlite3.connect(layer.metadata_db_path.resolve().as_uri() + "?mode=ro", uri=True) as connection:
+                rows = connection.execute("SELECT entity_type,entity_id FROM delta_tombstones").fetchall()
+            for entity_type, entity_id in rows:
+                if entity_type == "chunk" and isinstance(entity_id, str) and entity_id:
+                    chunks.add(entity_id)
+                elif entity_type == "vector" and isinstance(entity_id, str) and entity_id.isdecimal():
+                    vectors.add(int(entity_id))
+                elif entity_type != "doc_version":
+                    raise KnowledgeBaseLoadError()
+        return chunks, vectors
+
+    @staticmethod
+    def _validate_cross_layer_ids(
+        layers: Sequence[_LoadedLayer],
+        tombstoned_chunks: set[str],
+        tombstoned_vectors: set[int],
+    ) -> None:
+        chunk_ids: set[str] = set()
+        vector_ids: set[int] = set()
+        for layer in layers:
+            with sqlite3.connect(layer.metadata_db_path.resolve().as_uri() + "?mode=ro", uri=True) as connection:
+                rows = connection.execute(
+                    "SELECT chunk_id,vector_id FROM chunks WHERE embedding_status='success' AND vector_id IS NOT NULL"
+                ).fetchall()
+            for chunk_id, vector_id in rows:
+                if not isinstance(chunk_id, str) or not isinstance(vector_id, int):
+                    raise KnowledgeBaseLoadError()
+                if chunk_id not in tombstoned_chunks:
+                    if chunk_id in chunk_ids:
+                        raise KnowledgeBaseLoadError()
+                    chunk_ids.add(chunk_id)
+                if vector_id not in tombstoned_vectors:
+                    if vector_id in vector_ids:
+                        raise KnowledgeBaseLoadError()
+                    vector_ids.add(vector_id)
+
 
 def _required_string(metadata: dict[str, Any], key: str) -> str:
     value = metadata.get(key)
@@ -938,6 +1121,7 @@ def _vector_search_hit_from_row(
         vector_id=candidate.vector_id,
         vector_score=candidate.vector_score,
         vector_rank=candidate.vector_rank,
+        extension=_optional_row_text(row, "extension"),
     )
 
 
@@ -961,6 +1145,7 @@ def _chunk_metadata_from_row(row: sqlite3.Row) -> ChunkMetadata:
         paragraph_start=_optional_row_int(row, "paragraph_start"),
         paragraph_end=_optional_row_int(row, "paragraph_end"),
         vector_id=int(vector_id) if vector_id is not None else None,
+        extension=_optional_row_text(row, "extension"),
     )
 
 

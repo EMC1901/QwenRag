@@ -62,7 +62,9 @@ class ReferenceFormatter:
                 groups[source_key] = group
 
             self._append_unique(group.evidence_nos, selected.evidence_no)
-            self._append_unique(group.locations, self._location(hit))
+            location = self._location(hit)
+            if location:
+                self._append_unique(group.locations, location)
 
         files = [
             ReferenceFile(
@@ -108,6 +110,18 @@ class ReferenceFormatter:
 
     def _display_name(self, hit: RetrievalHit) -> str:
         basename = self._safe_basename(hit.relative_path)
+        filename = self._display_text(basename)
+        title = hit.doc_title or hit.title
+        title_display = self._display_text(title)
+        if filename and title_display:
+            stem = basename.rsplit(".", 1)[0] if "." in basename else basename
+            if self._normalize_text(title).casefold() != self._normalize_text(stem).casefold():
+                return f"{title_display}（{filename}）"
+            return filename
+        if filename:
+            return filename
+        if title_display:
+            return title_display
         for value in (basename, hit.doc_title, hit.title, "未命名资料"):
             display = self._display_text(value)
             if display:
@@ -124,6 +138,9 @@ class ReferenceFormatter:
         return parts[-1] if parts else ""
 
     def _location(self, hit: RetrievalHit) -> str:
+        extension = (hit.extension or self._safe_basename(hit.relative_path).rsplit(".", 1)[-1]).lower()
+        if extension in {".pdf", "pdf"}:
+            return ""
         parts: list[str] = []
         for value in (hit.section_path, hit.article_range or hit.article_no):
             normalized = self._normalize_text(value)
@@ -201,4 +218,16 @@ class ReferenceFormatter:
                     "",
                 ]
             )
+        return "\n".join(lines).rstrip()
+
+    @staticmethod
+    def _render_section(files: Iterable[ReferenceFile]) -> str:
+        """Render source locations only when the source format supports them."""
+        lines = ["参考文件："]
+        for item in files:
+            evidence = "、".join(f"[资料{number}]" for number in item.evidence_nos)
+            lines.append(f"[{item.reference_no}] {item.display_name}")
+            if item.locations:
+                lines.append(f"    位置：{'；'.join(item.locations)}")
+            lines.extend([f"    对应资料：{evidence}", ""])
         return "\n".join(lines).rstrip()

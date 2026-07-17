@@ -304,6 +304,7 @@ def _retrieval_hit_from_candidate(
         fts_rank=candidate.fts_rank,
         final_score=candidate.final_score,
         matched_by=candidate.matched_by,
+        extension=metadata.extension,
     )
 
 

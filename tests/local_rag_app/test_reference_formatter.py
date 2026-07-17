@@ -23,6 +23,7 @@ def _selected(
     article_range: str | None = None,
     paragraph_start: int | None = 1,
     paragraph_end: int | None = 3,
+    extension: str | None = None,
 ) -> SelectedContextHit:
     hit = RetrievalHit(
         rank=evidence_no,
@@ -39,6 +40,7 @@ def _selected(
         paragraph_end=paragraph_end,
         final_score=0.5,
         matched_by="vector",
+        extension=extension,
     )
     return SelectedContextHit(
         evidence_no=evidence_no,
@@ -54,12 +56,12 @@ def test_formatter_groups_one_file_and_renders_the_contract() -> None:
 
     assert result.selected_hit_count == 1
     assert result.location_count == 1
-    assert result.files[0].display_name == "project.docx"
+    assert result.files[0].display_name == "项目说明书（project.docx）"
     assert result.files[0].locations == ["第一章 / 第一条 / 段落 1-3"]
     assert result.files[0].evidence_nos == [1]
     assert result.section_text == (
         "参考文件：\n"
-        "[1] project.docx\n"
+        "[1] 项目说明书（project.docx）\n"
         "    位置：第一章 / 第一条 / 段落 1-3\n"
         "    对应资料：[资料1]"
     )
@@ -99,7 +101,7 @@ def test_formatter_does_not_merge_same_basename_from_different_directories() -> 
     )
 
     assert [item.reference_no for item in result.files] == [1, 2]
-    assert [item.display_name for item in result.files] == ["说明.docx", "说明.docx"]
+    assert [item.display_name for item in result.files] == ["项目说明书（说明.docx）", "项目说明书（说明.docx）"]
 
 
 def test_formatter_prefers_article_range_and_handles_paragraph_variants() -> None:
@@ -164,7 +166,7 @@ def test_formatter_hides_paths_and_private_retrieval_fields() -> None:
 
     result = ReferenceFormatter().build([selected])
 
-    assert result.files[0].display_name == "private.docx"
+    assert result.files[0].display_name == "项目说明书（private.docx）"
     assert "C:\\PRIVATE-PATH-SECRET" not in result.section_text
     assert "PRIVATE-DOC-ID" not in result.section_text
     assert "PRIVATE-CHUNK-1" not in result.section_text
@@ -211,7 +213,7 @@ def test_formatter_escapes_markdown_html_controls_and_long_values() -> None:
 
     result = ReferenceFormatter().build([selected, long_location])
 
-    assert result.files[0].display_name.startswith("\\[点击\\]")
+    assert result.files[0].display_name.startswith("项目说明书（\\[点击\\]")
     assert "网址" in result.files[0].display_name
     assert "&lt;script&gt; PRIVATE &lt;/script&gt;\\|\\`\\_\\*\\#\\!" in (
         result.files[0].locations[0]
@@ -236,3 +238,35 @@ def test_formatter_rejects_empty_or_duplicate_evidence_and_does_not_mutate_input
         formatter.build([])
     with pytest.raises(ReferenceFormatError, match="unique"):
         formatter.build([_selected(1), _selected(1, relative_path="other.docx")])
+
+
+def test_formatter_shows_title_and_filename_but_omits_pdf_location() -> None:
+    """PDF references do not invent page or paragraph positions from chunk data."""
+    result = ReferenceFormatter().build(
+        [
+            _selected(
+                1,
+                relative_path="reports/annual-report.pdf",
+                doc_title="Annual Report",
+                section_path="Chapter 4",
+                paragraph_start=9,
+                paragraph_end=12,
+                extension=".pdf",
+            ),
+            _selected(
+                2,
+                relative_path="notes.txt",
+                doc_title="Notes",
+                section_path="Introduction",
+                paragraph_start=2,
+                paragraph_end=2,
+                extension=".txt",
+            ),
+        ]
+    )
+
+    assert result.files[0].display_name == "Annual Report（annual-report.pdf）"
+    assert result.files[0].locations == []
+    assert result.files[1].locations == ["Introduction / 第一条 / 段落 2"]
+    assert "位置：Chapter 4" not in result.section_text
+    assert result.section_text.count("位置：") == 1

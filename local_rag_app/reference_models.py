@@ -15,7 +15,7 @@ class ReferenceFile(BaseModel):
 
     reference_no: PositiveInt
     display_name: str = Field(min_length=1)
-    locations: list[str] = Field(min_length=1)
+    locations: list[str]
     evidence_nos: list[PositiveInt] = Field(min_length=1)
 
 

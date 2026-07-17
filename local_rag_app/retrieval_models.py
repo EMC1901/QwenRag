@@ -29,6 +29,7 @@ class RetrievalHit(BaseModel):
     fts_rank: int | None = Field(default=None, ge=1)
     final_score: float = Field(ge=0)
     matched_by: Literal["vector", "fts", "both"]
+    extension: str | None = None
 
 
 class RetrievalResult(BaseModel):

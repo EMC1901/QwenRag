@@ -35,9 +35,18 @@ temp/
 # Source legal documents are local input data and can be very large.
 /Rawdata/
 
+# Offline delivery assets and one-off developer helpers are managed outside
+# the source repository.
+/models/
+/tools/
+
 # Local project documentation is not included in the source repository.
 /docs/
 /记事本.md
+
+# Customer-facing Windows directory junctions are machine-local and cannot be
+# restored safely from Git on another computer.
+/资料入库工作台/
 
 # Local editor, assistant, and operating-system files.
 .vscode/

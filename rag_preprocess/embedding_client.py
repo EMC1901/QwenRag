@@ -52,13 +52,14 @@ def _post_embeddings(
     base_url: str | None,
     payload: dict,
     timeout: int,
+    api_key: str | None = None,
 ):
     """发送 embedding 请求。默认绕过 HTTP_PROXY/HTTPS_PROXY。"""
     if _trust_env_proxy():
         return requests.post(
             _embedding_endpoint(base_url),
             json=payload,
-            headers=_headers(),
+            headers=_headers(api_key),
             timeout=timeout,
         )
 
@@ -68,7 +69,7 @@ def _post_embeddings(
         return session.post(
             _embedding_endpoint(base_url),
             json=payload,
-            headers=_headers(),
+            headers=_headers(api_key),
             timeout=timeout,
         )
     finally:
@@ -110,6 +111,7 @@ def embed_text(
     base_url: str | None = None,
     timeout: int | None = None,
     max_retries: int = 2,
+    api_key: str | None = None,
 ) -> EmbeddingResult:
     """调用 embedding 服务，返回一个向量。"""
     result = embed_batch(
@@ -119,6 +121,7 @@ def embed_text(
         base_url=base_url,
         timeout=timeout,
         max_retries=max_retries,
+        api_key=api_key,
     )
     return result[0] if result else EmbeddingResult(
         success=False,
@@ -134,6 +137,7 @@ def embed_batch(
     base_url: str | None = None,
     timeout: int | None = None,
     max_retries: int = 2,
+    api_key: str | None = None,
 ) -> list[EmbeddingResult]:
     """批量向量化。"""
     results: list[EmbeddingResult] = []
@@ -147,11 +151,14 @@ def embed_batch(
 
         while retry_count <= max_retries:
             try:
-                response = _post_embeddings(
-                    base_url=base_url,
-                    payload=payload,
-                    timeout=timeout,
-                )
+                request_args = {
+                    "base_url": base_url,
+                    "payload": payload,
+                    "timeout": timeout,
+                }
+                if api_key is not None:
+                    request_args["api_key"] = api_key
+                response = _post_embeddings(**request_args)
                 response.raise_for_status()
                 batch_results = _parse_embedding_response(response.json(), len(batch))
                 for result in batch_results:

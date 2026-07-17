@@ -84,6 +84,19 @@ def test_build_router_request_omits_client_system_and_preserves_chat_roles() -> 
     assert router_request.stream is False
 
 
+def test_router_prompt_is_specific_to_national_and_local_regulations() -> None:
+    """The route contract must follow the deployed law/regulation corpus."""
+    for expected_text in (
+        "全国性法律",
+        "地方性法规",
+        "第几条/第几款",
+        "法规库也可能没有依据",
+        "不得因此改走 Direct",
+    ):
+        assert expected_text in RAG_ROUTER_SYSTEM_PROMPT
+    assert "涉及客户、公司、项目、合同、内部制度" not in RAG_ROUTER_SYSTEM_PROMPT
+
+
 def _settings() -> Settings:
     return Settings(
         LOCAL_RAG_ANSWER_MODE="gateway",
