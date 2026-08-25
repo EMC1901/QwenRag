@@ -29,7 +29,7 @@ def main() -> int:
     parser.add_argument("--env-file", type=Path, help="增量配置文件，默认 .env.incremental")
     args = parser.parse_args()
     try:
-        settings = load_incremental_settings(env_file=args.env_file, project_root=PROJECT_ROOT)
+        settings = load_incremental_settings(env_file=args.env_file)
     except IncrementalConfigurationError as exc:
         print(f"配置错误：{exc}")
         print("请修正 .env.incremental 后重新运行。")

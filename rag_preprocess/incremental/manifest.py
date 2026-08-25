@@ -32,6 +32,7 @@ class KnowledgeManifest:
     deltas: tuple[LayerSpec, ...]
     next_vector_id: int
     embedding_model: str
+    embedding_revision: str
     embedding_dim: int
     vector_metric: str
     vector_normalized: bool
@@ -62,6 +63,10 @@ def load_manifest(root: Path, manifest_path: Path | None = None) -> KnowledgeMan
             deltas=deltas,
             next_vector_id=_nonnegative_int(raw["next_vector_id"]),
             embedding_model=_nonempty_text(raw["embedding_model"]),
+            # Older development knowledge bases did not record a model
+            # revision.  Preserve their readability while every delivered
+            # Base/Deltas records the exact installed revision.
+            embedding_revision=_nonempty_text(raw.get("embedding_revision", "legacy-unknown")),
             embedding_dim=_positive_int(raw["embedding_dim"]),
             vector_metric=_nonempty_text(raw["vector_metric"]),
             vector_normalized=_bool(raw["vector_normalized"]),
@@ -84,6 +89,7 @@ def legacy_base_manifest(root: Path, *, embedding_model: str, embedding_dim: int
         deltas=(),
         next_vector_id=next_vector_id,
         embedding_model=embedding_model,
+        embedding_revision="legacy-unknown",
         embedding_dim=embedding_dim,
         vector_metric="inner_product",
         vector_normalized=True,
@@ -123,6 +129,7 @@ def publish_delta(
         deltas=(*current.deltas, delta),
         next_vector_id=next_vector_id,
         embedding_model=current.embedding_model,
+        embedding_revision=current.embedding_revision,
         embedding_dim=current.embedding_dim,
         vector_metric=current.vector_metric,
         vector_normalized=current.vector_normalized,
@@ -191,6 +198,7 @@ def _to_json(manifest: KnowledgeManifest) -> dict[str, object]:
         "deltas": [layer_json(layer, "delta_id") for layer in manifest.deltas],
         "next_vector_id": manifest.next_vector_id,
         "embedding_model": manifest.embedding_model,
+        "embedding_revision": manifest.embedding_revision,
         "embedding_dim": manifest.embedding_dim,
         "vector_metric": manifest.vector_metric,
         "vector_normalized": manifest.vector_normalized,

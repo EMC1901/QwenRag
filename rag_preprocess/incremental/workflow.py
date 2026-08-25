@@ -101,10 +101,10 @@ def run_stages_4_to_9(settings, task_id: str) -> dict[str, object]:
             for row in rows:
                 if row.state=='READY_TO_DELTA': row.state='DELTA_BUILT'
             _write_task_state(task_path,task_id,'BUILDING_DELTA_FTS')
-            build_delta_indexes(delta_root,embedding_dim=settings.embedding_dim,embedding_model=settings.embedding_model)
+            build_delta_indexes(delta_root,embedding_dim=settings.embedding_dim,embedding_model=settings.embedding_model,embedding_revision=settings.embedding_revision)
             _write_task_state(task_path,task_id,'BUILDING_DELTA_FAISS')
             _write_task_state(task_path,task_id,'VALIDATING_DELTA')
-            validate_delta_package(delta_root,embedding_dim=settings.embedding_dim,embedding_model=settings.embedding_model)
+            validate_delta_package(delta_root,embedding_dim=settings.embedding_dim,embedding_model=settings.embedding_model,embedding_revision=settings.embedding_revision)
             for row in rows:
                 if row.state=='DELTA_BUILT': row.state='DELTA_VALIDATED'
             _write_task_state(task_path,task_id,'PUBLISHING')

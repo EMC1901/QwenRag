@@ -12,6 +12,13 @@ class HealthResponse(BaseModel):
     service: str
 
 
+class ReadinessResponse(BaseModel):
+    """Safe supervisor-facing readiness state with no operational secrets."""
+
+    status: Literal["ready", "not_ready"]
+    checks: dict[str, str]
+
+
 class ModelCard(BaseModel):
     """Minimal OpenAI-compatible model descriptor exposed to Chatbox."""
 

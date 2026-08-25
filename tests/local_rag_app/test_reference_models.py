@@ -33,7 +33,7 @@ def test_reference_models_accept_a_complete_reference_section() -> None:
     [
         ("reference_no", 0),
         ("display_name", ""),
-        ("locations", []),
+        ("locations", [""]),
         ("evidence_nos", []),
         ("evidence_nos", [0]),
     ],
@@ -48,6 +48,14 @@ def test_reference_file_rejects_invalid_required_values(
 
     with pytest.raises(ValidationError):
         ReferenceFile(**values)
+
+
+def test_reference_file_allows_a_locationless_source() -> None:
+    """A PDF reference can be shown without inventing page or paragraph metadata."""
+    values = _file().model_dump()
+    values["locations"] = []
+
+    assert ReferenceFile(**values).locations == []
 
 
 def test_reference_models_forbid_unknown_fields() -> None:

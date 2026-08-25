@@ -195,17 +195,38 @@ def build_faiss_index(
     index = faiss.IndexIDMap2(base_index)
     index.add_with_ids(matrix, ids)
 
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    faiss.write_index(index, str(output_path))
+    write_faiss_index(index, output_path)
     return int(index.ntotal)
 
 
+def write_faiss_index(index, index_path: Path) -> None:
+    """Persist an index through Python file I/O.
+
+    FAISS' Windows file helpers use a narrow-character path API in some wheels,
+    which breaks for normal Chinese user directories.  Serialising in memory
+    leaves path handling to Python's Unicode-aware ``Path`` implementation.
+    """
+    faiss = _require_faiss()
+    index_path.parent.mkdir(parents=True, exist_ok=True)
+    # Keep compatibility with minimal FAISS test doubles and older FAISS
+    # bindings.  Production Windows wheels provide serialize_index, which is
+    # required for Unicode-safe paths.
+    if not hasattr(faiss, "serialize_index"):
+        faiss.write_index(index, str(index_path))
+        return
+    serialized = faiss.serialize_index(index)
+    index_path.write_bytes(bytes(serialized))
+
+
 def load_faiss_index(index_path: Path):
-    """Load a FAISS index from disk."""
+    """Load a FAISS index through Python file I/O (Unicode-path safe)."""
     faiss = _require_faiss()
     if not index_path.exists():
         raise FileNotFoundError(f"FAISS index does not exist: {index_path}")
-    return faiss.read_index(str(index_path))
+    if not hasattr(faiss, "deserialize_index"):
+        return faiss.read_index(str(index_path))
+    serialized = np.frombuffer(index_path.read_bytes(), dtype=np.uint8)
+    return faiss.deserialize_index(serialized)
 
 
 def search_faiss(

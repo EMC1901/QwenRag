@@ -15,7 +15,9 @@ class ReferenceFile(BaseModel):
 
     reference_no: PositiveInt
     display_name: str = Field(min_length=1)
-    locations: list[str]
+    # Some source formats (notably PDFs) have no trustworthy location metadata.
+    # The list may therefore be empty, but a supplied location must be meaningful.
+    locations: list[Annotated[str, Field(min_length=1)]]
     evidence_nos: list[PositiveInt] = Field(min_length=1)
 
 

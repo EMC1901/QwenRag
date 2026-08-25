@@ -210,6 +210,7 @@ def test_loads_valid_assets_once_and_opens_only_readonly_connections(
     assert knowledge_base.is_ready is True
     assert knowledge_base.index is loader.index
     assert knowledge_base.index_metadata.embedding_dim == 3
+    assert knowledge_base.index_metadata.embedding_revision == "legacy-unknown"
     assert knowledge_base.index_metadata.vector_normalized is True
     assert loader.paths == [knowledge_base_dir / "vector_index" / "index.faiss"]
 
@@ -279,6 +280,7 @@ def test_rejects_index_metadata_with_missing_required_field(
     "metadata_overrides",
     [
         {"embedding_model": "other-model"},
+        {"embedding_revision": "   "},
         {"embedding_dim": 4},
         {"vector_metric": "l2"},
         {"vector_normalized": False},

@@ -53,7 +53,7 @@ PY
 then
   echo "Gateway dependencies are missing." >&2
   echo "Install them on the server with:" >&2
-  echo "  ${PYTHON_BIN} -m pip install -r requirements-gateway.txt" >&2
+  echo "  ${PYTHON_BIN} -m pip install -r requirements/gateway.txt" >&2
   exit 1
 fi
 

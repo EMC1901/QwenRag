@@ -8,6 +8,8 @@ from fastapi import FastAPI, Request
 from starlette.responses import Response
 
 from model_gateway.config import Settings, get_settings
+from qwenrag_runtime.logging_setup import configure_component_logging
+from qwenrag_runtime.paths import get_runtime_paths
 
 REQUEST_ID_HEADER = "X-Request-ID"
 LOGGER_NAME = "model_gateway"
@@ -16,11 +18,9 @@ LOGGER_NAME = "model_gateway"
 def configure_logging(settings: Settings | None = None) -> None:
     """Configure process-level logging for the gateway."""
     settings = settings or get_settings()
-    logging.basicConfig(
-        level=settings.log_level,
-        format="%(asctime)s %(levelname)s %(name)s %(message)s",
+    configure_component_logging(
+        LOGGER_NAME, settings.log_level, get_runtime_paths().log_root / "gateway"
     )
-    logging.getLogger(LOGGER_NAME).setLevel(settings.log_level)
 
 
 def add_request_logging_middleware(app: FastAPI) -> None:

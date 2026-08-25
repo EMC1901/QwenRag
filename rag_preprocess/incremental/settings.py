@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Mapping
 
 from dotenv import dotenv_values
+from qwenrag_runtime.paths import RuntimePaths, get_runtime_paths
 
 
 class IncrementalConfigurationError(ValueError):
@@ -62,6 +63,7 @@ class IncrementalSettings:
     embedding_base_url: str
     embedding_api_key: str | None
     embedding_model: str
+    embedding_revision: str
     embedding_dim: int
     embedding_batch_size: int
     failed_work_retention_days: int
@@ -99,10 +101,19 @@ def load_incremental_settings(
     env_file: Path | None = None,
     environ: Mapping[str, str] | None = None,
     project_root: Path | None = None,
+    runtime_paths: RuntimePaths | None = None,
 ) -> IncrementalSettings:
     """Load ``.env.incremental`` without changing process environment variables."""
-    root = (project_root or Path(__file__).resolve().parents[2]).resolve(strict=False)
-    selected_env_file = env_file or root / ".env.incremental"
+    paths = runtime_paths or get_runtime_paths()
+    has_explicit_project_root = project_root is not None
+    root = (project_root or paths.resource_root).resolve(strict=False)
+    data_root = root if has_explicit_project_root else paths.data_root
+    resource_root = root if has_explicit_project_root else paths.resource_root
+    selected_env_file = env_file or (
+        root / ".env.incremental"
+        if has_explicit_project_root
+        else paths.incremental_env_file
+    )
     values: dict[str, str] = {}
     if selected_env_file.is_file():
         values.update(
@@ -114,11 +125,27 @@ def load_incremental_settings(
         )
     values.update(dict(os.environ if environ is None else environ))
 
-    kb_root = _path(values, "INCREMENTAL_KB_ROOT", "rag_data", root)
+    kb_default = root / "rag_data" if has_explicit_project_root else paths.knowledge_base_root
+    kb_root = _path(values, "INCREMENTAL_KB_ROOT", kb_default, root)
     incremental_root = _path(values, "INCREMENTAL_ROOT", kb_root / "incremental", root)
-    incoming_dir = _path(values, "INCREMENTAL_INCOMING_DIR", incremental_root / "incoming", root)
-    archive_dir = _path(values, "INCREMENTAL_ARCHIVE_DIR", incremental_root / "archive", root)
-    results_dir = _path(values, "INCREMENTAL_RESULTS_DIR", incremental_root / "results", root)
+    incoming_default = (
+        incremental_root / "incoming"
+        if has_explicit_project_root
+        else paths.workbench_incoming_dir
+    )
+    archive_default = (
+        incremental_root / "archive"
+        if has_explicit_project_root
+        else paths.workbench_archive_dir
+    )
+    results_default = (
+        incremental_root / "results"
+        if has_explicit_project_root
+        else paths.workbench_results_dir
+    )
+    incoming_dir = _path(values, "INCREMENTAL_INCOMING_DIR", incoming_default, root)
+    archive_dir = _path(values, "INCREMENTAL_ARCHIVE_DIR", archive_default, root)
+    results_dir = _path(values, "INCREMENTAL_RESULTS_DIR", results_default, root)
     work_dir = _path(values, "INCREMENTAL_WORK_DIR", incremental_root / "work", root)
     locks_dir = _path(values, "INCREMENTAL_LOCKS_DIR", incremental_root / "locks", root)
     logs_dir = _path(values, "INCREMENTAL_LOG_DIR", incremental_root / "logs", root)
@@ -126,6 +153,7 @@ def load_incremental_settings(
     deltas_dir = _path(values, "KB_DELTAS_DIR", kb_root / "kb_deltas", root)
     manifest_path = _path(values, "KB_MANIFEST_PATH", kb_root / "knowledge_manifest.json", root)
     current_pointer = _path(values, "KB_CURRENT_POINTER", kb_root / "current_generation.txt", root)
+    _require_within(kb_root, data_root, "INCREMENTAL_KB_ROOT", "data root")
     data_paths = {
         "INCREMENTAL_ROOT": incremental_root,
         "INCREMENTAL_INCOMING_DIR": incoming_dir,
@@ -142,8 +170,13 @@ def load_incremental_settings(
     for key, path in data_paths.items():
         _require_within(path, kb_root, key, "知识库根目录")
 
-    ocr_model_dir = _path(values, "OCR_MODEL_DIR", "models/ocr", root)
-    _require_within(ocr_model_dir, root, "OCR_MODEL_DIR", "项目目录")
+    ocr_default = (
+        root / "models" / "ocr"
+        if has_explicit_project_root
+        else paths.ocr_resource_root
+    )
+    ocr_model_dir = _path(values, "OCR_MODEL_DIR", ocr_default, root)
+    _require_within(ocr_model_dir, resource_root, "OCR_MODEL_DIR", "项目目录资源")
     settings = IncrementalSettings(
         project_root=root,
         knowledge_base_root=kb_root,
@@ -184,6 +217,7 @@ def load_incremental_settings(
         embedding_base_url=_url(values, "EMBEDDING_BASE_URL", "http://127.0.0.1:8002/v1"),
         embedding_api_key=_optional_text(values, "EMBEDDING_API_KEY"),
         embedding_model=_required_text(values, "EMBEDDING_MODEL", "qwen3-embedding-0.6b"),
+        embedding_revision=_required_text(values, "EMBEDDING_REVISION", "legacy-unknown"),
         embedding_dim=_positive_int(values, "EMBEDDING_DIM", 1024),
         embedding_batch_size=_positive_int(values, "EMBEDDING_BATCH_SIZE", 128),
         failed_work_retention_days=_nonnegative_int(values, "FAILED_WORK_RETENTION_DAYS", 7),

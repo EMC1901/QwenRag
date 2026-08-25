@@ -23,6 +23,9 @@ class Config:
 
     # embedding
     embedding_model: str = "qwen3-embedding-0.6b"
+    # Persist an immutable upstream artifact/version label with every new index.
+    # The delivery launcher supplies this from deployment.json in stage 4.
+    embedding_revision: str = "unconfigured"
     embedding_dim: int = 1024
     embedding_batch_size: int = 128
     vector_normalized: bool = True

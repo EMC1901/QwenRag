@@ -2,7 +2,7 @@
 # Keep this file and the offline wheel cache together when deploying.
 python-dotenv==1.2.2
 requests==2.32.5
-numpy==2.4.2
+numpy==2.2.6
 PyMuPDF==1.27.2.2
 charset-normalizer==3.4.6
 faiss-cpu==1.14.3

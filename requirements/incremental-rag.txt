@@ -1,14 +1,14 @@
 # 增量资料入库的直接依赖清单。请不要在客户运行期联网安装或下载模型。
 #
 # 锁定流程：在目标 Windows + CPU OCR 环境通过 parser/OCR/FAISS 回归后，执行：
-#   python -m pip freeze > requirements-incremental-rag.lock
-#   python -m pip download --requirement requirements-incremental-rag.lock --dest wheels
-# 将 lock 文件、wheels 目录、Python 版本与 OCR 模型 SHA-256 一并纳入交付清单。
+#   python -m pip freeze > requirements/incremental-rag.lock.txt
+#   python -m pip download --requirement requirements/incremental-rag.lock.txt --dest wheelhouse
+# 将 lock 文件、wheelhouse 目录、Python 版本与 OCR 模型 SHA-256 一并纳入交付清单。
 # 升级任何依赖或模型前必须重新完成同一套回归和离线安装演练。
 
 python-dotenv==1.2.2
 requests==2.32.5
-numpy==2.4.2
+numpy==2.2.6
 PyMuPDF==1.27.2.2
 charset-normalizer==3.4.6
 faiss-cpu==1.14.3

@@ -1,0 +1,16 @@
+# Canonical direct dependencies for the Windows offline delivery build.
+# The fully resolved, hash-pinned output is requirements/delivery.lock.txt.
+# Includes are resolved relative to this requirements/ directory.
+-r local-rag.txt
+-r gateway.txt
+-r incremental-rag.lock.txt
+
+# Build-time tooling. These are not shipped in the customer runtime.
+PyInstaller
+pip-tools
+
+# Keep the requests stack within the compatibility bounds of requests 2.32.5.
+# PaddleX declares chardet without an upper limit, which would otherwise resolve
+# to a version rejected by requests at import time.
+chardet<6
+urllib3<2.4

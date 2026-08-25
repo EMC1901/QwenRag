@@ -41,7 +41,7 @@ def main() -> int:
     args = parser.parse_args()
 
     try:
-        settings = load_incremental_settings(env_file=args.env_file, project_root=PROJECT_ROOT)
+        settings = load_incremental_settings(env_file=args.env_file)
         if args.command == "submit":
             return _submit(settings, json_output=args.json)
         if args.command == "worker":

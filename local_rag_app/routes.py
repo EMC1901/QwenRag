@@ -17,7 +17,9 @@ from local_rag_app.schemas import (
     HealthResponse,
     ModelCard,
     ModelListResponse,
+    ReadinessResponse,
 )
+from local_rag_app.readiness import check_readiness
 
 
 router = APIRouter()
@@ -27,6 +29,27 @@ router = APIRouter()
 async def health() -> HealthResponse:
     """Return process-level health without probing the model gateway."""
     return HealthResponse(status="ok", service="local-rag-app")
+
+
+@router.get("/health/ready", response_model=ReadinessResponse)
+async def health_ready(
+    request: Request,
+    settings: Annotated[Settings, Depends(get_settings)],
+):
+    """Report readiness without exposing model output, paths, or KB contents."""
+    checker = getattr(request.app.state, "readiness_checker", None)
+    if checker is not None:
+        result = await checker(settings)
+    else:
+        result = await check_readiness(
+            settings,
+            knowledge_base_status=getattr(
+                request.app.state,
+                "knowledge_base_status",
+                "failed",
+            ),
+        )
+    return JSONResponse(content=result.payload(), status_code=200 if result.ready else 503)
 
 
 @router.get(

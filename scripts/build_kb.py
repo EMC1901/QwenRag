@@ -53,6 +53,11 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="阶段 8 embedding 批量大小（正整数，默认使用配置值）",
     )
+    parser.add_argument(
+        "--embedding-revision",
+        default=None,
+        help="Embedding 模型制品版本；会写入新知识库的索引元数据",
+    )
     parser.add_argument("--log-level", default="INFO", help="日志级别")
     return parser.parse_args()
 
@@ -1161,6 +1166,7 @@ def _run_stage_embed_impl(config: Config, logger) -> None:
 
     meta = {
         "embedding_model": config.embedding_model,
+        "embedding_revision": config.embedding_revision,
         "embedding_dim": config.embedding_dim,
         "vector_normalized": config.vector_normalized,
         "vector_metric": config.vector_metric,
@@ -1367,6 +1373,9 @@ def run_stage_faiss(config: Config, logger) -> None:
         if config.vector_metric == "inner_product"
         else f"IndexIDMap2({config.vector_metric})",
         "embedding_model": stage8_meta.get("embedding_model", config.embedding_model),
+        "embedding_revision": stage8_meta.get(
+            "embedding_revision", config.embedding_revision
+        ),
         "embedding_dim": config.embedding_dim,
         "vector_metric": config.vector_metric,
         "vector_normalized": config.vector_normalized,
@@ -1424,6 +1433,11 @@ def main() -> None:
             args.embedding_batch_size
             if args.embedding_batch_size is not None
             else Config.embedding_batch_size
+        ),
+        embedding_revision=(
+            args.embedding_revision.strip()
+            if args.embedding_revision and args.embedding_revision.strip()
+            else Config.embedding_revision
         ),
     )
 

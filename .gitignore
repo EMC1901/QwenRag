@@ -1,56 +1,171 @@
-# Environment-specific configuration and secrets.
-# Keep only checked-in templates such as .env.gateway.example.
+# -----------------------------------------------------------------------------
+# Local environment files, deployment settings, and credentials.
+# Keep sanitized examples in Git; never publish machine-specific secrets.
+# -----------------------------------------------------------------------------
 .env
 .env.*
+.envrc
 !.env.example
 !.env.*.example
 
-# Python bytecode, virtual environments, and tool caches.
+deployment.json
+deployment.*.json
+!deployment.example.json
+!deployment.*.example.json
+secrets.json
+secrets.*.json
+!secrets.example.json
+!secrets.*.example.json
+credentials.json
+credentials.*.json
+!credentials.example.json
+!credentials.*.example.json
+*.pem
+*.key
+*.p12
+*.pfx
+*.jks
+*.keystore
+
+# -----------------------------------------------------------------------------
+# Python bytecode, virtual environments, local Python runtimes, and wheels.
+# -----------------------------------------------------------------------------
 __pycache__/
 *.py[cod]
 *$py.class
+*.egg
+*.egg-info/
+.eggs/
+.installed.cfg
+pip-wheel-metadata/
+
 .venv/
+.venv-*/
 venv/
 env/
 ENV/
+/.build-tools/
+/wheelhouse/
+/wheels/
+/pip-cache/
+*.whl
+
+# -----------------------------------------------------------------------------
+# Test, type-checker, linter, notebook, and coverage output.
+# -----------------------------------------------------------------------------
 .pytest_cache/
+.pytest-tmp*/
+.hypothesis/
 .mypy_cache/
+.pyre/
+.pytype/
 .ruff_cache/
 .tox/
 .nox/
+.ipynb_checkpoints/
+.cache/
 .coverage
 .coverage.*
+coverage.xml
 htmlcov/
+junit.xml
+junit-*.xml
+pytestdebug.log
 
-# Runtime logs and temporary files.
+# -----------------------------------------------------------------------------
+# Runtime logs, process state, scratch files, and local backups.
+# -----------------------------------------------------------------------------
 *.log
+*.pid
+*.pid.lock
+*.tmp
+*.temp
+*.bak
+*.old
+*.orig
+*.swp
+*.swo
+*~
+/logs/
+/runtime/
 .tmp/
 tmp/
 temp/
 
-# Locally generated RAG artifacts: databases, converted documents, FAISS index,
-# exports, logs, and temporary test data. Rebuild with scripts/build_kb.py.
-/rag_data/
-
-# Source legal documents are local input data and can be very large.
+# -----------------------------------------------------------------------------
+# Local business data, SQLite files, FAISS indexes, and model weights.
+# These assets are private, machine-specific, or far too large for GitHub.
+# -----------------------------------------------------------------------------
 /Rawdata/
-
-# Offline delivery assets and one-off developer helpers are managed outside
-# the source repository.
+/rag_data/
+/data/
 /models/
-/tools/
+/snapshots/
+/资料入库工作台/
+.qwenrag-kb-snapshot-*/
 
-# Local project documentation is not included in the source repository.
+*.db
+*.db-journal
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite-journal
+*.sqlite-shm
+*.sqlite-wal
+*.sqlite3
+*.faiss
+*.gguf
+*.safetensors
+*.onnx
+*.pdmodel
+*.pdiparams
+*.pt
+*.pth
+*.ckpt
+
+# -----------------------------------------------------------------------------
+# Generated Python builds, PyInstaller output, installers, and release media.
+# Keep packaging/*.spec, installer definitions, manifests, and release_docs.
+# -----------------------------------------------------------------------------
+/build/
+/dist/
+/artifacts/
+/packaging/build/
+/packaging/dist/
+/packaging/output/
+/packaging/payload/initial_kb/
+/release/
+
+*.exe
+*.dll
+*.pyd
+*.so
+*.dylib
+*.bin
+*.msi
+*.msix
+*.zip
+*.7z
+*.rar
+*.tar
+*.tar.gz
+*.tgz
+
+# -----------------------------------------------------------------------------
+# Private operational notes, local IDE settings, and operating-system files.
+# Developer utilities under tools/ are source code and intentionally remain
+# visible; customer-safe documents under packaging/release_docs/ remain visible.
+# -----------------------------------------------------------------------------
 /docs/
 /记事本.md
-
-# Customer-facing Windows directory junctions are machine-local and cannot be
-# restored safely from Git on another computer.
-/资料入库工作台/
-
-# Local editor, assistant, and operating-system files.
+/.agents/
 .vscode/
 .idea/
 .claude/
+.cursor/
+.history/
+*.code-workspace
 .DS_Store
+._*
 Thumbs.db
+Desktop.ini

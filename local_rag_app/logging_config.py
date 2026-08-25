@@ -11,6 +11,8 @@ from time import perf_counter
 from fastapi import FastAPI, Request, Response
 
 from local_rag_app.config import get_settings
+from qwenrag_runtime.logging_setup import configure_component_logging
+from qwenrag_runtime.paths import get_runtime_paths
 
 
 REQUEST_ID_HEADER = "X-Request-ID"
@@ -53,11 +55,7 @@ _RETRIEVAL_MODES = frozenset({"vector", "hybrid"})
 
 def configure_logging(level: str) -> None:
     """Configure a named logger without ever enabling request-body logging."""
-    logging.basicConfig(
-        level=level,
-        format="%(asctime)s %(levelname)s %(name)s %(message)s",
-    )
-    logging.getLogger(LOGGER_NAME).setLevel(level)
+    configure_component_logging(LOGGER_NAME, level, get_runtime_paths().log_root / "rag")
 
 
 def get_request_id() -> str | None:

@@ -1,0 +1,68 @@
+{
+  "schema_version": 1,
+  "ports": {
+    "llm": 8001,
+    "embedding": 8002,
+    "gateway": 8010,
+    "rag": 18080
+  },
+  "llm": {
+    "base_url": "http://127.0.0.1:8001/v1",
+    "ready_url": "http://127.0.0.1:8001/health",
+    "expected_model": "qwen3.6-27b",
+    "executable": "D:\\QwenRAG\\llama.cpp\\llama-server.exe",
+    "working_directory": "D:\\QwenRAG\\llama.cpp",
+    "arguments": [
+      "-m",
+      "D:\\QwenRAG\\models\\Qwen3.6-27B-Q4_K_M.gguf",
+      "--host",
+      "127.0.0.1",
+      "--port",
+      "8001",
+      "--alias",
+      "qwen3.6-27b",
+      "-c",
+      "8192",
+      "--n-gpu-layers",
+      "99"
+    ],
+    "startup_timeout_seconds": 600
+  },
+  "embedding": {
+    "base_url": "http://127.0.0.1:8002/v1",
+    "ready_url": "http://127.0.0.1:8002/health",
+    "expected_model": "qwen3-embedding-0.6b",
+    "expected_revision": "Qwen3-Embedding-0.6B-GGUF",
+    "expected_dimension": 1024,
+    "executable": "D:\\QwenRAG\\llama.cpp\\llama-server.exe",
+    "working_directory": "D:\\QwenRAG\\llama.cpp",
+    "arguments": [
+      "-m",
+      "D:\\QwenRAG\\models\\Qwen3-Embedding-0.6B.gguf",
+      "--host",
+      "127.0.0.1",
+      "--port",
+      "8002",
+      "--alias",
+      "qwen3-embedding-0.6b",
+      "--embedding",
+      "--pooling",
+      "last",
+      "--embd-normalize",
+      "2",
+      "--n-gpu-layers",
+      "99"
+    ],
+    "startup_timeout_seconds": 300
+  },
+  "rag": {
+    "model_name": "local-rag",
+    "embedding_dimension": 1024,
+    "llm_context_window": 8192
+  },
+  "runtime": {
+    "gateway_startup_timeout_seconds": 30,
+    "rag_startup_timeout_seconds": 300,
+    "graceful_shutdown_timeout_seconds": 10
+  }
+}

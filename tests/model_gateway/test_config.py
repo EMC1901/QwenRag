@@ -12,7 +12,7 @@ from model_gateway.http_client import build_timeout
 def test_default_config_loads() -> None:
     settings = Settings(_env_file=None)
 
-    assert settings.gateway_host == "0.0.0.0"
+    assert settings.gateway_host == "127.0.0.1"
     assert settings.gateway_port == 8010
     assert settings.gateway_api_keys == ["change-me"]
     assert settings.llm_base_url == "http://127.0.0.1:8001/v1"
@@ -29,6 +29,12 @@ def test_base_urls_are_normalized() -> None:
 
     assert settings.llm_base_url == "http://127.0.0.1:8001/v1"
     assert settings.embedding_base_url == "http://127.0.0.1:8002/v1"
+
+
+@pytest.mark.parametrize("host", ["0.0.0.0", "192.168.1.8", "gateway.local"])
+def test_non_loopback_gateway_host_is_rejected(host: str) -> None:
+    with pytest.raises(ValidationError, match="GATEWAY_HOST"):
+        Settings(GATEWAY_HOST=host, _env_file=None)
 
 
 def test_gateway_api_keys_are_parsed_from_csv() -> None:

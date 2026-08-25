@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
-from enum import StrEnum
+from enum import Enum
 import hashlib, math, os, socket, sqlite3, time, unicodedata
 from pathlib import Path
 from typing import Callable, Iterable
@@ -11,7 +11,7 @@ from .persistence import write_checkpoint
 
 SUPPORTED_EXTENSIONS = {".docx", ".pdf", ".txt"}
 
-class IntakeAction(StrEnum):
+class IntakeAction(str, Enum):
     NEW = "NEW"; UPDATE = "UPDATE"; DUPLICATE_UNCHANGED = "DUPLICATE_UNCHANGED"
 
 @dataclass(frozen=True)

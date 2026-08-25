@@ -63,6 +63,7 @@ class IndexMetadata:
     """Validated fields required to query one FAISS knowledge-base index."""
 
     embedding_model: str
+    embedding_revision: str
     embedding_dim: int
     vector_metric: str
     vector_normalized: bool
@@ -884,13 +885,19 @@ class KnowledgeBase:
             raise KnowledgeBaseLoadError()
 
         embedding_model = _required_string(raw_metadata, "embedding_model")
+        embedding_revision = _optional_revision(raw_metadata)
         embedding_dim = _required_positive_int(raw_metadata, "embedding_dim")
         vector_metric = _required_string(raw_metadata, "vector_metric")
         vector_normalized = _required_bool(raw_metadata, "vector_normalized")
-        vector_count = _required_positive_int(raw_metadata, "vector_count")
+        vector_count = _required_nonnegative_int(raw_metadata, "vector_count")
         is_partial = _required_bool(raw_metadata, "is_partial_embedding_index")
 
         if embedding_model != self._settings.upstream_embedding_model:
+            raise KnowledgeBaseLoadError()
+        if (
+            self._settings.upstream_embedding_revision
+            and embedding_revision != self._settings.upstream_embedding_revision
+        ):
             raise KnowledgeBaseLoadError()
         if embedding_dim != self._settings.rag_embedding_dim:
             raise KnowledgeBaseLoadError()
@@ -900,9 +907,12 @@ class KnowledgeBase:
             raise KnowledgeBaseLoadError()
         if is_partial and not (allow_delta_partial or self._settings.rag_allow_partial_index):
             raise KnowledgeBaseLoadError()
+        if is_partial and vector_count == 0:
+            raise KnowledgeBaseLoadError()
 
         return IndexMetadata(
             embedding_model=embedding_model,
+            embedding_revision=embedding_revision,
             embedding_dim=embedding_dim,
             vector_metric=vector_metric,
             vector_normalized=vector_normalized,
@@ -989,11 +999,11 @@ class KnowledgeBase:
             raise KnowledgeBaseLoadError()
         mapped_count = int(row["mapped_count"])
         distinct_vector_count = int(row["distinct_vector_count"])
-        if (
-            mapped_count <= 0
-            or mapped_count != distinct_vector_count
-            or mapped_count != metadata.vector_count
-        ):
+        if mapped_count != distinct_vector_count or mapped_count != metadata.vector_count:
+            raise KnowledgeBaseLoadError()
+        if metadata.vector_count == 0:
+            return
+        if mapped_count <= 0:
             raise KnowledgeBaseLoadError()
 
     def _validate_faiss_index(self, index: Any, metadata: IndexMetadata) -> None:
@@ -1077,9 +1087,23 @@ def _required_string(metadata: dict[str, Any], key: str) -> str:
     return value
 
 
+def _optional_revision(metadata: dict[str, Any]) -> str:
+    """Read a versioned index field while retaining safe legacy compatibility."""
+    if "embedding_revision" not in metadata:
+        return "legacy-unknown"
+    return _required_string(metadata, "embedding_revision")
+
+
 def _required_positive_int(metadata: dict[str, Any], key: str) -> int:
     value = metadata.get(key)
     if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        raise KnowledgeBaseLoadError()
+    return value
+
+
+def _required_nonnegative_int(metadata: dict[str, Any], key: str) -> int:
+    value = metadata.get(key)
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
         raise KnowledgeBaseLoadError()
     return value
 

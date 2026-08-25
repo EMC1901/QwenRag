@@ -24,6 +24,7 @@ def build_delta_indexes(
     *,
     embedding_dim: int,
     embedding_model: str,
+    embedding_revision: str = "legacy-unknown",
     faiss_builder: Callable[..., int] = build_faiss_index,
 ) -> dict[str, object]:
     """Build only this Delta's FTS and FAISS assets; Base remains untouched."""
@@ -68,6 +69,7 @@ def build_delta_indexes(
     delta_meta = _load_json_object(delta_root / "delta.meta.json")
     metadata = {
         "embedding_model": embedding_model,
+        "embedding_revision": embedding_revision,
         "embedding_dim": embedding_dim,
         "vector_metric": "inner_product",
         "vector_normalized": True,
@@ -106,6 +108,7 @@ def validate_delta_package(
     *,
     embedding_dim: int,
     embedding_model: str,
+    embedding_revision: str = "legacy-unknown",
     faiss_loader: Callable[[Path], Any] = load_faiss_index,
 ) -> dict[str, object]:
     """Validate Delta SQLite/FTS/JSONL/meta/FAISS consistency before publish."""
@@ -121,6 +124,7 @@ def validate_delta_package(
     delta_meta = _load_json_object(delta_root / "delta.meta.json")
     if (
         index_meta.get("embedding_model") != embedding_model
+        or index_meta.get("embedding_revision", "legacy-unknown") != embedding_revision
         or index_meta.get("embedding_dim") != embedding_dim
         or index_meta.get("vector_metric") != "inner_product"
         or index_meta.get("vector_normalized") is not True

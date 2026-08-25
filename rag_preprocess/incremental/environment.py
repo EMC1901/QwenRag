@@ -82,7 +82,7 @@ def check_incremental_environment(
                 report,
                 "DEPENDENCY_MISSING",
                 f"缺少依赖：{package_name}。",
-                "按照 requirements-incremental-rag.txt 安装已锁定的离线 wheel 后重试。",
+                "按照 requirements/incremental-rag.txt 安装已锁定的离线 wheel 后重试。",
             )
 
     # PaddleOCR 3.x import can probe model-host connectivity.  Finding its
@@ -98,7 +98,7 @@ def check_incremental_environment(
                 report,
                 "DEPENDENCY_MISSING",
                 f"缺少依赖：{package_name}。",
-                "按照 requirements-incremental-rag.txt 安装已锁定的离线 wheel 后重试。",
+                "按照 requirements/incremental-rag.txt 安装已锁定的离线 wheel 后重试。",
             )
 
     _check_ocr_models(settings, report)

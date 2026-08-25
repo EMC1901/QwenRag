@@ -84,7 +84,7 @@ def _validate_index_metadata(settings) -> None:
     if not metadata.exists(): return
     try: raw=json.loads(metadata.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc: raise EmbeddingPreflightError("INDEX_METADATA_INVALID") from exc
-    if raw.get("embedding_model") != settings.embedding_model or raw.get("embedding_dim") != settings.embedding_dim or raw.get("vector_normalized") is not True or raw.get("vector_metric") != "inner_product": raise EmbeddingPreflightError("EMBEDDING_INDEX_CONFIGURATION_MISMATCH")
+    if raw.get("embedding_model") != settings.embedding_model or raw.get("embedding_revision", "legacy-unknown") != settings.embedding_revision or raw.get("embedding_dim") != settings.embedding_dim or raw.get("vector_normalized") is not True or raw.get("vector_metric") != "inner_product": raise EmbeddingPreflightError("EMBEDDING_INDEX_CONFIGURATION_MISMATCH")
 
 def _is_unit_vector(vector: Sequence[float]) -> bool:
     norm=math.sqrt(sum(float(value)*float(value) for value in vector)); return math.isfinite(norm) and abs(norm-1.0) < 1e-4

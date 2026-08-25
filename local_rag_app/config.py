@@ -7,9 +7,12 @@ from typing import Annotated, Any, Literal
 
 from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
+from qwenrag_runtime.paths import RuntimePathError, get_runtime_paths
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
+# Kept for source-mode tools and backward-compatible imports.  Installed
+# processes obtain their configuration file from RuntimePaths instead.
 ENV_FILE = PROJECT_ROOT / ".env.local-rag"
 
 
@@ -73,9 +76,12 @@ class Settings(BaseSettings):
         default="qwen3-embedding-0.6b",
         alias="UPSTREAM_EMBEDDING_MODEL",
     )
+    upstream_embedding_revision: str = Field(
+        default="", alias="UPSTREAM_EMBEDDING_REVISION"
+    )
 
     rag_knowledge_base_dir: Path = Field(
-        default=PROJECT_ROOT / "rag_data",
+        default_factory=lambda: get_runtime_paths().knowledge_base_root,
         alias="RAG_KNOWLEDGE_BASE_DIR",
     )
     rag_embedding_dim: int = Field(
@@ -184,8 +190,7 @@ class Settings(BaseSettings):
     log_request_body: bool = Field(default=False, alias="LOG_REQUEST_BODY")
 
     model_config = SettingsConfigDict(
-        env_file=ENV_FILE,
-        env_file_encoding="utf-8",
+        env_file=None,
         extra="ignore",
         populate_by_name=True,
     )
@@ -205,6 +210,7 @@ class Settings(BaseSettings):
         "local_rag_model",
         "upstream_llm_model",
         "upstream_embedding_model",
+        "upstream_embedding_revision",
         mode="before",
     )
     @classmethod
@@ -218,10 +224,12 @@ class Settings(BaseSettings):
         """Resolve a configured knowledge-base root without touching the filesystem."""
         if value is None or not str(value).strip():
             raise ValueError("RAG_KNOWLEDGE_BASE_DIR cannot be empty")
-        path = Path(value).expanduser()
-        if not path.is_absolute():
-            path = PROJECT_ROOT / path
-        return path.resolve(strict=False)
+        try:
+            return get_runtime_paths().require_data_path(
+                Path(value), "RAG_KNOWLEDGE_BASE_DIR"
+            )
+        except RuntimePathError as exc:
+            raise ValueError(str(exc)) from exc
 
     @field_validator("local_rag_api_keys", mode="before")
     @classmethod
@@ -342,7 +350,7 @@ def get_settings() -> Settings:
         "yes",
     }:
         return Settings(_env_file=None)
-    return Settings()
+    return Settings(_env_file=get_runtime_paths().local_rag_env_file)
 
 
 def reset_settings_cache() -> None:

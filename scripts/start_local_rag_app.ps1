@@ -4,11 +4,6 @@ param()
 $ErrorActionPreference = "Stop"
 
 $projectRoot = Split-Path -Parent $PSScriptRoot
-$envFile = Join-Path $projectRoot ".env.local-rag"
-
-if (-not (Test-Path -LiteralPath $envFile)) {
-    throw "Missing $envFile. Copy .env.local-rag.example to .env.local-rag, set its values, then rerun this script."
-}
 
 Push-Location $projectRoot
 try {
@@ -21,7 +16,7 @@ try {
 
     $settingsJson = & python -c "import json; from local_rag_app.config import get_settings; settings = get_settings(); print(json.dumps({'host': settings.local_rag_host, 'port': settings.local_rag_port}))"
     if ($LASTEXITCODE -ne 0) {
-        throw "Configuration validation failed. Correct .env.local-rag and rerun the script."
+        throw "Configuration validation failed. Correct the deployed QwenRAG configuration and rerun this script."
     }
 
     $settings = $settingsJson | ConvertFrom-Json

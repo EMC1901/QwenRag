@@ -1,16 +1,18 @@
 """Configuration helpers for the model gateway."""
 
 from functools import lru_cache
+import os
 from typing import Annotated, Any
 
 from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
+from qwenrag_runtime.paths import get_runtime_paths
 
 
 class Settings(BaseSettings):
     """Runtime settings loaded from environment variables."""
 
-    gateway_host: str = Field(default="0.0.0.0", alias="GATEWAY_HOST")
+    gateway_host: str = Field(default="127.0.0.1", alias="GATEWAY_HOST")
     gateway_port: int = Field(default=8010, alias="GATEWAY_PORT")
     gateway_api_keys: Annotated[list[str], NoDecode] = Field(
         default_factory=lambda: ["change-me"],
@@ -62,8 +64,7 @@ class Settings(BaseSettings):
     log_request_body: bool = Field(default=False, alias="LOG_REQUEST_BODY")
 
     model_config = SettingsConfigDict(
-        env_file=".env",
-        env_file_encoding="utf-8",
+        env_file=None,
         extra="ignore",
         populate_by_name=True,
     )
@@ -91,6 +92,14 @@ class Settings(BaseSettings):
             raise ValueError("base URL cannot be empty")
         return normalized
 
+    @field_validator("gateway_host", mode="before")
+    @classmethod
+    def validate_loopback_host(cls, value: Any) -> str:
+        normalized = str(value).strip()
+        if normalized not in {"127.0.0.1", "::1"}:
+            raise ValueError("GATEWAY_HOST must be 127.0.0.1 or ::1")
+        return normalized
+
     @field_validator("log_level", mode="before")
     @classmethod
     def normalize_log_level(cls, value: Any) -> str:
@@ -110,7 +119,13 @@ class Settings(BaseSettings):
 @lru_cache
 def get_settings() -> Settings:
     """Return cached runtime settings."""
-    return Settings()
+    if os.getenv("MODEL_GATEWAY_DISABLE_ENV_FILE", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+    }:
+        return Settings(_env_file=None)
+    return Settings(_env_file=get_runtime_paths().gateway_env_file)
 
 
 def reset_settings_cache() -> None:

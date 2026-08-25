@@ -361,7 +361,13 @@ def _remove_lock_dir(settings: IncrementalSettings) -> None:
 
 
 def _relative(settings: IncrementalSettings, path: Path) -> str:
-    return path.relative_to(settings.project_root).as_posix()
+    # Installed data lives below LOCALAPPDATA while program resources live
+    # below the read-only bundle.  Source mode keeps the older relative paths;
+    # frozen mode returns an absolute, directly usable diagnostic path.
+    try:
+        return path.relative_to(settings.project_root).as_posix()
+    except ValueError:
+        return str(path)
 
 
 def _new_task_id() -> str:
